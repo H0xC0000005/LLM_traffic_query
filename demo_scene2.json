@@ -1,0 +1,149 @@
+{
+  "ego": {
+    "lane": 2,
+    "speed_kmh": 100.0,
+    "type": "sedan"
+  },
+  "road": {
+    "driving_direction": "right",
+    "overtaking_rule": "keep_right_pass_left",
+    "lanes": [
+      {
+        "id": 1,
+        "type": "driving",
+        "speed_limit_kmh": 130
+      },
+      {
+        "id": 2,
+        "type": "driving",
+        "speed_limit_kmh": 110
+      },
+      {
+        "id": 3,
+        "type": "emergency",
+        "speed_limit_kmh": 30
+      }
+    ]
+  },
+  "meta": {
+    "phase": "sync",
+    "window_m": 250.0,
+    "n_requested": 10,
+    "n_emitted": 10,
+    "generated_at": "2025-10-20T11:01:33.674460Z",
+    "seed": 42,
+    "notes": "Distances are center-to-center; safe distances enforced bumper-to-bumper in placement."
+  },
+  "vehicles": [
+    {
+      "id": "veh_1_0011",
+      "type": "suv",
+      "lane": 1,
+      "coord": [
+        1,
+        16.21
+      ],
+      "speed_kmh": 115.0,
+      "length_m": 4.9
+    },
+    {
+      "id": "veh_1_0001",
+      "type": "sedan",
+      "lane": 1,
+      "coord": [
+        1,
+        18.93
+      ],
+      "speed_kmh": 117.3,
+      "length_m": 4.6
+    },
+    {
+      "id": "veh_2_0007",
+      "type": "suv",
+      "lane": 2,
+      "coord": [
+        2,
+        -39.1
+      ],
+      "speed_kmh": 94.3,
+      "length_m": 4.9
+    },
+    {
+      "id": "veh_2_0018",
+      "type": "truck",
+      "lane": 2,
+      "coord": [
+        2,
+        -41.99
+      ],
+      "speed_kmh": 82.1,
+      "length_m": 12.0
+    },
+    {
+      "id": "veh_2_0001",
+      "type": "sedan",
+      "lane": 2,
+      "coord": [
+        2,
+        42.94
+      ],
+      "speed_kmh": 98.0,
+      "length_m": 4.6
+    },
+    {
+      "id": "veh_2_0013",
+      "type": "sedan",
+      "lane": 2,
+      "coord": [
+        2,
+        42.94
+      ],
+      "speed_kmh": 98.0,
+      "length_m": 4.6
+    },
+    {
+      "id": "veh_1_0016",
+      "type": "sedan",
+      "lane": 1,
+      "coord": [
+        1,
+        -43.69
+      ],
+      "speed_kmh": 102.0,
+      "length_m": 4.6
+    },
+    {
+      "id": "veh_1_0006",
+      "type": "suv",
+      "lane": 1,
+      "coord": [
+        1,
+        -51.44
+      ],
+      "speed_kmh": 102.0,
+      "length_m": 4.9
+    },
+    {
+      "id": "veh_1_0012",
+      "type": "sedan",
+      "lane": 1,
+      "coord": [
+        1,
+        63.83
+      ],
+      "speed_kmh": 120.7,
+      "length_m": 4.6
+    },
+    {
+      "id": "veh_1_0002",
+      "type": "sedan",
+      "lane": 1,
+      "coord": [
+        1,
+        66.14
+      ],
+      "speed_kmh": 116.9,
+      "length_m": 4.6
+    }
+  ]
+}

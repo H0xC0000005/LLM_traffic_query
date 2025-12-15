@@ -1,0 +1,2 @@
+lane,back_id,back_type,back_speed_kmh,back_s_m,front_id,front_type,front_speed_kmh,front_s_m,gap_m,required_m,reason
+2,veh_2_0002,truck,76.5,-27.78,ego,ego,110.0,0.0,19.48,20.78,gap 19.5 < required 20.8 (phase=sync)

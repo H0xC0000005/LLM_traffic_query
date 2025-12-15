@@ -1,0 +1,13 @@
+Bubble sort repeats these steps until no swaps occur:
+
+1. Start at the left end of the array.
+2. Compare each pair of adjacent items.
+3. If the left item is greater than the right, swap them.
+4. Move one position right and repeat steps 2-3 until the end of the unsorted portion.
+5. After each pass, the largest remaining item has "bubbled" to its correct position at the end.
+6. Shrink the unsorted portion by one and begin the next pass.
+
+Time complexity: O(n^2) in average and worst cases.  
+Space complexity: O(1).
+----------------------------
+Compare each pair of adjacent items.

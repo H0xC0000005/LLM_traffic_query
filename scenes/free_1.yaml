@@ -1,0 +1,113 @@
+ego:
+  lane: 2
+  speed_kmh: 120.0
+  type: sedan
+road:
+  driving_direction: right
+  overtaking_rule: keep_right_pass_left
+  lanes:
+  - id: 1
+    type: driving
+    speed_limit_kmh: 130
+  - id: 2
+    type: driving
+    speed_limit_kmh: 110
+  - id: 3
+    type: emergency
+    speed_limit_kmh: 30
+meta:
+  phase: free
+  window_m: 300.0
+  n_requested: 10
+  n_emitted: 10
+  generated_at: '2025-10-23T14:26:49.679461Z'
+  seed: null
+  notes: Distances are center-to-center; safe distances enforced via stateful placement
+    + safety sweep.
+  safety_report:
+    violations_before: 1
+    violations_after: 0
+    shifted: 2
+    pruned: 0
+    mode: shift_front
+vehicles:
+- id: veh_3_0001
+  type: maintenance
+  lane: 3
+  coord:
+  - 3
+  - -9.5
+  speed_kmh: 2.0
+  length_m: 6.0
+- id: veh_1_0003
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - 19.0
+  speed_kmh: 130.0
+  length_m: 4.6
+- id: veh_3_0002
+  type: maintenance
+  lane: 3
+  coord:
+  - 3
+  - -19.7
+  speed_kmh: 0.6
+  length_m: 6.0
+- id: veh_2_0001
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - 41.05
+  speed_kmh: 115.0
+  length_m: 4.6
+- id: veh_1_0001
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - -42.09
+  speed_kmh: 125.0
+  length_m: 4.6
+- id: veh_2_0002
+  type: truck
+  lane: 2
+  coord:
+  - 2
+  - -42.3
+  speed_kmh: 85.6
+  length_m: 12.0
+- id: veh_2_0004
+  type: truck
+  lane: 2
+  coord:
+  - 2
+  - 52.15
+  speed_kmh: 110.0
+  length_m: 12.0
+- id: veh_2_0003
+  type: suv
+  lane: 2
+  coord:
+  - 2
+  - -60.14
+  speed_kmh: 90.6
+  length_m: 4.9
+- id: veh_1_0002
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - -86.27
+  speed_kmh: 130.0
+  length_m: 4.6
+- id: veh_1_0004
+  type: suv
+  lane: 1
+  coord:
+  - 1
+  - -144.34
+  speed_kmh: 126.9
+  length_m: 4.9

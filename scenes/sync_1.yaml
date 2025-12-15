@@ -1,0 +1,273 @@
+ego:
+  lane: 2
+  speed_kmh: 120.0
+  type: sedan
+road:
+  driving_direction: right
+  overtaking_rule: keep_right_pass_left
+  lanes:
+  - id: 1
+    type: driving
+    speed_limit_kmh: 130
+  - id: 2
+    type: driving
+    speed_limit_kmh: 110
+  - id: 3
+    type: emergency
+    speed_limit_kmh: 30
+meta:
+  phase: sync
+  window_m: 300.0
+  n_requested: 30
+  n_emitted: 30
+  generated_at: '2025-10-23T16:00:47.300250Z'
+  seed: null
+  notes: Distances are center-to-center; safe distances enforced via stateful placement
+    + safety sweep.
+  safety_report:
+    violations_before: 2
+    violations_after: 0
+    shifted: 2
+    pruned: 0
+    mode: shift_front
+vehicles:
+- id: veh_2_0002
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - -6.49
+  speed_kmh: 94.7
+  length_m: 4.6
+- id: veh_3_0001
+  type: maintenance
+  lane: 3
+  coord:
+  - 3
+  - -9.32
+  speed_kmh: 8.5
+  length_m: 6.0
+- id: veh_3_0002
+  type: maintenance
+  lane: 3
+  coord:
+  - 3
+  - 10.26
+  speed_kmh: 8.0
+  length_m: 6.0
+- id: veh_1_0001
+  type: truck
+  lane: 1
+  coord:
+  - 1
+  - 10.4
+  speed_kmh: 120.4
+  length_m: 12.0
+- id: veh_2_0001
+  type: van
+  lane: 2
+  coord:
+  - 2
+  - 11.19
+  speed_kmh: 118.0
+  length_m: 5.2
+- id: veh_2_0003
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - -30.99
+  speed_kmh: 96.7
+  length_m: 4.6
+- id: veh_1_0002
+  type: truck
+  lane: 1
+  coord:
+  - 1
+  - -31.59
+  speed_kmh: 85.8
+  length_m: 12.0
+- id: veh_2_0004
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - 68.12
+  speed_kmh: 116.0
+  length_m: 4.6
+- id: veh_1_0003
+  type: bus
+  lane: 1
+  coord:
+  - 1
+  - 69.96
+  speed_kmh: 118.4
+  length_m: 13.0
+- id: veh_1_0004
+  type: truck
+  lane: 1
+  coord:
+  - 1
+  - -77.49
+  speed_kmh: 87.4
+  length_m: 12.0
+- id: veh_2_0005
+  type: bus
+  lane: 2
+  coord:
+  - 2
+  - 79.02
+  speed_kmh: 114.0
+  length_m: 13.0
+- id: veh_2_0007
+  type: truck
+  lane: 2
+  coord:
+  - 2
+  - -81.99
+  speed_kmh: 82.3
+  length_m: 12.0
+- id: veh_1_0006
+  type: truck
+  lane: 1
+  coord:
+  - 1
+  - -120.3
+  speed_kmh: 86.9
+  length_m: 12.0
+- id: veh_2_0010
+  type: truck
+  lane: 2
+  coord:
+  - 2
+  - -123.37
+  speed_kmh: 82.0
+  length_m: 12.0
+- id: veh_2_0006
+  type: bus
+  lane: 2
+  coord:
+  - 2
+  - 129.99
+  speed_kmh: 112.0
+  length_m: 13.0
+- id: veh_1_0007
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - -130.7
+  speed_kmh: 88.9
+  length_m: 4.6
+- id: veh_1_0008
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - -153.89
+  speed_kmh: 90.9
+  length_m: 4.6
+- id: veh_1_0005
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - 161.91
+  speed_kmh: 121.1
+  length_m: 4.6
+- id: veh_2_0012
+  type: bus
+  lane: 2
+  coord:
+  - 2
+  - -164.11
+  speed_kmh: 84.0
+  length_m: 13.0
+- id: veh_1_0009
+  type: truck
+  lane: 1
+  coord:
+  - 1
+  - 172.31
+  speed_kmh: 119.1
+  length_m: 12.0
+- id: veh_2_0013
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - -175.01
+  speed_kmh: 86.0
+  length_m: 4.6
+- id: veh_1_0011
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - -177.45
+  speed_kmh: 92.9
+  length_m: 4.6
+- id: veh_1_0012
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - -201.41
+  speed_kmh: 94.9
+  length_m: 4.6
+- id: veh_2_0008
+  type: motorcycle
+  lane: 2
+  coord:
+  - 2
+  - 211.66
+  speed_kmh: 110.0
+  length_m: 2.2
+- id: veh_2_0015
+  type: van
+  lane: 2
+  coord:
+  - 2
+  - -215.6
+  speed_kmh: 88.0
+  length_m: 5.2
+- id: veh_1_0010
+  type: truck
+  lane: 1
+  coord:
+  - 1
+  - 231.08
+  speed_kmh: 117.1
+  length_m: 12.0
+- id: veh_2_0009
+  type: suv
+  lane: 2
+  coord:
+  - 2
+  - 234.51
+  speed_kmh: 108.0
+  length_m: 4.9
+- id: veh_1_0013
+  type: truck
+  lane: 1
+  coord:
+  - 1
+  - -262.93
+  speed_kmh: 87.5
+  length_m: 12.0
+- id: veh_2_0011
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - 277.15
+  speed_kmh: 106.0
+  length_m: 4.6
+- id: veh_2_0014
+  type: suv
+  lane: 2
+  coord:
+  - 2
+  - 297.31
+  speed_kmh: 104.0
+  length_m: 4.9

@@ -1,0 +1,2421 @@
+[SESSION] query_handler starting…
+
+[SEND -> LLM] INITIALIZATION PROMPT
+
+You are a traffic scenario analyst. Your task is to analyze traffic scenarios
+and classify them according to three-phase traffic theory. Or in other words, you should classify the traffic
+scenarios into one of the following traffic phase classes: free flow, synchronized flow, or wide moving jam.
+Speed, density, inter-vehicle distances are important factors to consider in your analysis.
+Here are some prior knowledge and tips, just for recap and emphasis:
+- Traffic phases include: free flow, synchronized flow, wide moving jam.
+- Free flow: vehicles can travel at desired speeds with minimal interaction.
+- Synchronized flow: vehicles adjust speeds to match surrounding traffic, leading to reduced speeds and increased density.
+- Wide moving jam: characterized by a dense cluster of slow or stopped vehicles that propagate backward through traffic.
+- Key factors: vehicle speeds, headways, density, flow rates.
+- Analyze speed variations, vehicle interactions, and traffic density patterns over time.
+- The scenes are captured from a bird's-eye view, with the ego vehicle at the center bottom, on autobahn-like roads without intersections.
+- There is no speed limit in all cases, but private vehicles typically travel between 100-150 km/h in free flow conditions.
+- There are no traffic control devices (e.g., traffic lights, stop signs) in these scenarios, and lane changes are infrequent.
+
+Here are three examples to illustrate the classification criteria:
+Example 1:
+vehicles:
+- id: veh_1_0001
+  type: truck
+  lane: 1
+  coord:
+  - 1
+  - 11.1
+  speed_kmh: 115.0
+  length_m: 12.0
+- id: veh_2_0001
+  type: suv
+  lane: 2
+  coord:
+  - 2
+  - -38.16
+  speed_kmh: 109.3
+  length_m: 4.9
+- id: veh_2_0002
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - 41.05
+  speed_kmh: 115.0
+  length_m: 4.6
+- id: veh_1_0002
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - -42.31
+  speed_kmh: 125.0
+  length_m: 4.6
+- id: veh_2_0003
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - -62.13
+  speed_kmh: 110.0
+  length_m: 4.6
+- id: veh_2_0005
+  type: suv
+  lane: 2
+  coord:
+  - 2
+  - 71.71
+  speed_kmh: 110.0
+  length_m: 4.9
+- id: veh_1_0004
+  type: bus
+  lane: 1
+  coord:
+  - 1
+  - -99.55
+  speed_kmh: 97.5
+  length_m: 13.0
+- id: veh_1_0003
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - 115.91
+  speed_kmh: 130.0
+  length_m: 4.6
+- id: veh_2_0004
+  type: van
+  lane: 2
+  coord:
+  - 2
+  - -126.45
+  speed_kmh: 109.3
+  length_m: 5.2
+- id: veh_2_0006
+  type: suv
+  lane: 2
+  coord:
+  - 2
+  - -160.98
+  speed_kmh: 110.0
+  length_m: 4.9
+Example 1 is characterized by vehicles traveling at high speeds with minimal interaction,
+indicating a free flow traffic phase.
+
+Example 2:
+vehicles:
+- id: veh_2_0004
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - -7.81
+  speed_kmh: 94.8
+  length_m: 4.6
+- id: veh_1_0001
+  type: suv
+  lane: 1
+  coord:
+  - 1
+  - 10.3
+  speed_kmh: 116.9
+  length_m: 4.9
+- id: veh_2_0001
+  type: truck
+  lane: 2
+  coord:
+  - 2
+  - 10.4
+  speed_kmh: 108.0
+  length_m: 12.0
+- id: veh_2_0006
+  type: motorcycle
+  lane: 2
+  coord:
+  - 2
+  - -33.58
+  speed_kmh: 96.8
+  length_m: 2.2
+- id: veh_1_0002
+  type: bus
+  lane: 1
+  coord:
+  - 1
+  - -46.36
+  speed_kmh: 89.8
+  length_m: 13.0
+- id: veh_2_0008
+  type: motorcycle
+  lane: 2
+  coord:
+  - 2
+  - -52.39
+  speed_kmh: 97.9
+  length_m: 2.2
+- id: veh_1_0003
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - 53.78
+  speed_kmh: 117.6
+  length_m: 4.6
+- id: veh_1_0004
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - -57.46
+  speed_kmh: 91.8
+  length_m: 4.6
+- id: veh_1_0005
+  type: suv
+  lane: 1
+  coord:
+  - 1
+  - 67.36
+  speed_kmh: 121.9
+  length_m: 4.9
+- id: veh_2_0009
+  type: truck
+  lane: 2
+  coord:
+  - 2
+  - -94.2
+  speed_kmh: 81.4
+  length_m: 12.0
+- id: veh_1_0006
+  type: suv
+  lane: 1
+  coord:
+  - 1
+  - -94.7
+  speed_kmh: 93.8
+  length_m: 4.9
+- id: veh_2_0002
+  type: suv
+  lane: 2
+  coord:
+  - 2
+  - 95.3
+  speed_kmh: 106.0
+  length_m: 4.9
+- id: veh_1_0007
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - 115.9
+  speed_kmh: 119.9
+  length_m: 4.6
+- id: veh_2_0003
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - 137.14
+  speed_kmh: 104.0
+  length_m: 4.6
+- id: veh_1_0009
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - 144.76
+  speed_kmh: 118.0
+  length_m: 4.6
+- id: veh_2_0005
+  type: bus
+  lane: 2
+  coord:
+  - 2
+  - 148.04
+  speed_kmh: 102.0
+  length_m: 13.0
+- id: veh_1_0008
+  type: bus
+  lane: 1
+  coord:
+  - 1
+  - -152.22
+  speed_kmh: 90.0
+  length_m: 13.0
+- id: veh_2_0007
+  type: maintenance
+  lane: 2
+  coord:
+  - 2
+  - 191.62
+  speed_kmh: 100.0
+  length_m: 6.0
+Example 2 shows vehicles adjusting their speeds to match surrounding traffic,
+leading to reduced speeds and increased density. There is also no jammed block and stalled vehicles, indicative of synchronized flow. 
+
+Example 3:
+vehicles:
+- id: veh_1_0002
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - -6.6
+  speed_kmh: 0.0
+  length_m: 4.6
+- id: veh_2_0001
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - -6.6
+  speed_kmh: 0.0
+  length_m: 4.6
+- id: veh_2_0002
+  type: truck
+  lane: 2
+  coord:
+  - 2
+  - 10.3
+  speed_kmh: 99.0
+  length_m: 12.0
+- id: veh_1_0003
+  type: van
+  lane: 1
+  coord:
+  - 1
+  - -14.0
+  speed_kmh: 1.0
+  length_m: 5.2
+- id: veh_2_0003
+  type: truck
+  lane: 2
+  coord:
+  - 2
+  - -18.9
+  speed_kmh: 0.0
+  length_m: 12.0
+- id: veh_1_0001
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - 23.12
+  speed_kmh: 99.0
+  length_m: 4.6
+- id: veh_1_0006
+  type: truck
+  lane: 1
+  coord:
+  - 1
+  - -26.6
+  speed_kmh: 2.0
+  length_m: 12.0
+- id: veh_2_0005
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - -29.2
+  speed_kmh: 1.0
+  length_m: 4.6
+- id: veh_1_0004
+  type: bus
+  lane: 1
+  coord:
+  - 1
+  - 33.92
+  speed_kmh: 98.0
+  length_m: 13.0
+- id: veh_1_0008
+  type: suv
+  lane: 1
+  coord:
+  - 1
+  - -37.55
+  speed_kmh: 3.0
+  length_m: 4.9
+- id: veh_2_0007
+  type: truck
+  lane: 2
+  coord:
+  - 2
+  - -41.5
+  speed_kmh: 0.0
+  length_m: 12.0
+- id: veh_1_0010
+  type: maintenance
+  lane: 1
+  coord:
+  - 1
+  - -46.0
+  speed_kmh: 4.0
+  length_m: 6.0
+- id: veh_2_0009
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - -51.8
+  speed_kmh: 0.0
+  length_m: 4.6
+- id: veh_2_0011
+  type: suv
+  lane: 2
+  coord:
+  - 2
+  - -59.05
+  speed_kmh: 1.0
+  length_m: 4.9
+- id: veh_1_0012
+  type: bus
+  lane: 1
+  coord:
+  - 1
+  - -59.5
+  speed_kmh: 0.0
+  length_m: 13.0
+- id: veh_2_0012
+  type: suv
+  lane: 2
+  coord:
+  - 2
+  - -66.45
+  speed_kmh: 2.0
+  length_m: 4.9
+- id: veh_1_0013
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - -70.3
+  speed_kmh: 1.0
+  length_m: 4.6
+- id: veh_2_0014
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - -73.2
+  speed_kmh: 0.0
+  length_m: 4.6
+- id: veh_1_0015
+  type: van
+  lane: 1
+  coord:
+  - 1
+  - -77.7
+  speed_kmh: 0.0
+  length_m: 5.2
+- id: veh_1_0017
+  type: van
+  lane: 1
+  coord:
+  - 1
+  - -85.4
+  speed_kmh: 0.0
+  length_m: 5.2
+- id: veh_2_0015
+  type: truck
+  lane: 2
+  coord:
+  - 2
+  - -85.5
+  speed_kmh: 0.0
+  length_m: 12.0
+- id: veh_2_0004
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - 87.06
+  speed_kmh: 98.0
+  length_m: 4.6
+- id: veh_1_0019
+  type: motorcycle
+  lane: 1
+  coord:
+  - 1
+  - -90.6
+  speed_kmh: 0.0
+  length_m: 2.2
+- id: veh_2_0019
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - -95.8
+  speed_kmh: 1.0
+  length_m: 4.6
+- id: veh_1_0020
+  type: van
+  lane: 1
+  coord:
+  - 1
+  - -96.8
+  speed_kmh: 1.0
+  length_m: 5.2
+- id: veh_2_0021
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - -102.4
+  speed_kmh: 2.0
+  length_m: 4.6
+- id: veh_1_0021
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - -103.7
+  speed_kmh: 2.0
+  length_m: 4.6
+- id: veh_1_0005
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - 104.71
+  speed_kmh: 97.0
+  length_m: 4.6
+- id: veh_2_0006
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - 109.82
+  speed_kmh: 97.0
+  length_m: 4.6
+- id: veh_1_0023
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - -110.3
+  speed_kmh: 0.0
+  length_m: 4.6
+- id: veh_1_0024
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - -116.9
+  speed_kmh: 1.0
+  length_m: 4.6
+- id: veh_1_0007
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - 127.31
+  speed_kmh: 96.0
+  length_m: 4.6
+- id: veh_2_0008
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - 132.42
+  speed_kmh: 96.0
+  length_m: 4.6
+- id: veh_1_0009
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - 149.73
+  speed_kmh: 95.0
+  length_m: 4.6
+- id: veh_2_0010
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - 154.84
+  speed_kmh: 95.0
+  length_m: 4.6
+- id: veh_1_0011
+  type: suv
+  lane: 1
+  coord:
+  - 1
+  - 167.38
+  speed_kmh: 94.0
+  length_m: 4.9
+- id: veh_2_0013
+  type: suv
+  lane: 2
+  coord:
+  - 2
+  - 172.5
+  speed_kmh: 94.0
+  length_m: 4.9
+- id: veh_1_0014
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - 202.17
+  speed_kmh: 93.0
+  length_m: 4.6
+- id: veh_2_0016
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - 207.28
+  speed_kmh: 93.0
+  length_m: 4.6
+- id: veh_1_0016
+  type: bus
+  lane: 1
+  coord:
+  - 1
+  - 212.97
+  speed_kmh: 92.0
+  length_m: 13.0
+- id: veh_2_0017
+  type: bus
+  lane: 2
+  coord:
+  - 2
+  - 218.08
+  speed_kmh: 92.0
+  length_m: 13.0
+- id: veh_1_0018
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - 278.14
+  speed_kmh: 91.0
+  length_m: 4.6
+- id: veh_2_0018
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - 283.25
+  speed_kmh: 91.0
+  length_m: 4.6
+- id: veh_2_0020
+  type: bus
+  lane: 2
+  coord:
+  - 2
+  - 294.05
+  speed_kmh: 90.0
+  length_m: 13.0
+- id: veh_1_0022
+  type: suv
+  lane: 1
+  coord:
+  - 1
+  - 295.49
+  speed_kmh: 90.0
+  length_m: 4.9
+Example 3 features a dense cluster of slow or stopped vehicles that propagate backward through traffic.
+There are a few vehicles driving with relatively high speeds ahead of the jammed block, which are detached from the jamming block behind. This is
+characteristic of a wide moving jam traffic phase. 
+
+For each scenario, provide your analysis in yaml format. You should substitute
+elements in angled brackets with your understanding of bracketed item. Your answer should only contain characters from ASCII set.
+Here is the designated format:
+
+```yaml
+result:
+  classification: <traffic_phase_class>
+  reasons: 
+    - <reason_1>
+    - <reason_2>
+    - ...
+```
+Where <traffic_phase_class> is one of: free flow, synchronized flow, wide moving jam.
+The reasons should clearly justify your classification based on the traffic characteristics observed in the scenario, and each item
+should be concise (no more than 20 words).
+Make sure your analysis is thorough and your classification is well-justified.
+
+I will provide you with one traffic scenario at a time for you to analyze.
+If you understand your task, please acknowledge by stating "Ready to analyze traffic scenarios."
+
+[DEBUG] response_id: resp_0b7bf793a48306ac0068f9e894cd60819ca6e38dffa4124b92
+
+
+[RECV <- LLM] INITIALIZATION RESPONSE (simulated)
+
+Ready to analyze traffic scenarios.
+
+Enter LLM response type [good | incomplete | bad_result | incomplete_reasoning | bad_reasoning | quit]:
+> >>> sending next scene: E:\repos\LLM_traffic_query\scenes\jam_2.yaml
+[INFO] Injected scenario: jam_2.yaml
+
+[SEND -> LLM] RESPONSE PROMPT (good)
+
+Your previous analysis is correct and sound.
+Now here is the next traffic scenario for you to analyze.
+You should analyze it carefully with the same task and provide your answer
+in the same designated markdown format.
+Here is a traffic scenario to analyze.
+Analyze the traffic scenario carefully and classify it as a traffic phase class according to the rules below.
+Remember that you should provide your answer in the instructed yaml format.
+
+Traffic Scenario:
+```yaml
+vehicles:
+- id: veh_2_0002
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - -6.6
+  speed_kmh: 0.0
+  length_m: 4.6
+- id: veh_1_0001
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - -6.6
+  speed_kmh: 0.0
+  length_m: 4.6
+- id: veh_2_0001
+  type: van
+  lane: 2
+  coord:
+  - 2
+  - 8.96
+  speed_kmh: 19.0
+  length_m: 5.2
+- id: veh_3_0004
+  type: maintenance
+  lane: 3
+  coord:
+  - 3
+  - 9.66
+  speed_kmh: 10.7
+  length_m: 6.0
+- id: veh_3_0001
+  type: maintenance
+  lane: 3
+  coord:
+  - 3
+  - -10.22
+  speed_kmh: 11.0
+  length_m: 6.0
+- id: veh_1_0002
+  type: van
+  lane: 1
+  coord:
+  - 1
+  - 12.31
+  speed_kmh: 67.0
+  length_m: 5.2
+- id: veh_2_0004
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - -13.2
+  speed_kmh: 1.0
+  length_m: 4.6
+- id: veh_1_0003
+  type: van
+  lane: 1
+  coord:
+  - 1
+  - -14.0
+  speed_kmh: 1.0
+  length_m: 5.2
+- id: veh_2_0005
+  type: motorcycle
+  lane: 2
+  coord:
+  - 2
+  - -18.1
+  speed_kmh: 2.0
+  length_m: 2.2
+- id: veh_3_0002
+  type: maintenance
+  lane: 3
+  coord:
+  - 3
+  - -19.22
+  speed_kmh: 0.0
+  length_m: 6.0
+- id: veh_2_0003
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - 19.9
+  speed_kmh: 19.9
+  length_m: 4.6
+- id: veh_1_0004
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - -20.9
+  speed_kmh: 0.0
+  length_m: 4.6
+- id: veh_2_0007
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - -23.5
+  speed_kmh: 3.0
+  length_m: 4.6
+- id: veh_1_0007
+  type: suv
+  lane: 1
+  coord:
+  - 1
+  - -28.15
+  speed_kmh: 1.0
+  length_m: 4.9
+- id: veh_2_0006
+  type: van
+  lane: 2
+  coord:
+  - 2
+  - 28.15
+  speed_kmh: 22.0
+  length_m: 5.2
+- id: veh_3_0003
+  type: maintenance
+  lane: 3
+  coord:
+  - 3
+  - -28.22
+  speed_kmh: 1.0
+  length_m: 6.0
+- id: veh_1_0009
+  type: motorcycle
+  lane: 1
+  coord:
+  - 1
+  - -33.2
+  speed_kmh: 0.0
+  length_m: 2.2
+- id: veh_2_0009
+  type: truck
+  lane: 2
+  coord:
+  - 2
+  - -35.8
+  speed_kmh: 0.0
+  length_m: 12.0
+- id: veh_1_0011
+  type: suv
+  lane: 1
+  coord:
+  - 1
+  - -39.25
+  speed_kmh: 1.0
+  length_m: 4.9
+- id: veh_2_0008
+  type: van
+  lane: 2
+  coord:
+  - 2
+  - 40.29
+  speed_kmh: 21.0
+  length_m: 5.2
+- id: veh_1_0005
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - 41.03
+  speed_kmh: 66.0
+  length_m: 4.6
+- id: veh_1_0013
+  type: suv
+  lane: 1
+  coord:
+  - 1
+  - -46.65
+  speed_kmh: 2.0
+  length_m: 4.9
+- id: veh_2_0011
+  type: motorcycle
+  lane: 2
+  coord:
+  - 2
+  - 50.94
+  speed_kmh: 20.0
+  length_m: 2.2
+- id: veh_2_0010
+  type: truck
+  lane: 2
+  coord:
+  - 2
+  - -51.8
+  speed_kmh: 1.0
+  length_m: 12.0
+- id: veh_1_0014
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - -53.4
+  speed_kmh: 0.0
+  length_m: 4.6
+- id: veh_1_0006
+  type: suv
+  lane: 1
+  coord:
+  - 1
+  - 56.08
+  speed_kmh: 65.0
+  length_m: 4.9
+- id: veh_2_0013
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - 58.06
+  speed_kmh: 22.6
+  length_m: 4.6
+- id: veh_1_0016
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - -60.0
+  speed_kmh: 1.0
+  length_m: 4.6
+- id: veh_1_0018
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - -66.6
+  speed_kmh: 2.0
+  length_m: 4.6
+- id: veh_2_0012
+  type: truck
+  lane: 2
+  coord:
+  - 2
+  - -67.8
+  speed_kmh: 0.0
+  length_m: 12.0
+- id: veh_2_0014
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - 67.81
+  speed_kmh: 21.6
+  length_m: 4.6
+- id: veh_1_0020
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - -73.2
+  speed_kmh: 3.0
+  length_m: 4.6
+- id: veh_2_0017
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - 77.39
+  speed_kmh: 20.6
+  length_m: 4.6
+- id: veh_2_0015
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - -78.1
+  speed_kmh: 1.0
+  length_m: 4.6
+- id: veh_1_0008
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - 80.9
+  speed_kmh: 64.0
+  length_m: 4.6
+- id: veh_2_0016
+  type: suv
+  lane: 2
+  coord:
+  - 2
+  - -85.35
+  speed_kmh: 2.0
+  length_m: 4.9
+- id: veh_1_0023
+  type: bus
+  lane: 1
+  coord:
+  - 1
+  - -86.0
+  speed_kmh: 4.0
+  length_m: 13.0
+- id: veh_2_0019
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - 86.8
+  speed_kmh: 19.6
+  length_m: 4.6
+- id: veh_1_0010
+  type: truck
+  lane: 1
+  coord:
+  - 1
+  - 91.2
+  speed_kmh: 63.0
+  length_m: 12.0
+- id: veh_2_0020
+  type: truck
+  lane: 2
+  coord:
+  - 2
+  - 97.3
+  speed_kmh: 26.3
+  length_m: 12.0
+- id: veh_1_0024
+  type: suv
+  lane: 1
+  coord:
+  - 1
+  - -97.45
+  speed_kmh: 5.0
+  length_m: 4.9
+- id: veh_2_0018
+  type: truck
+  lane: 2
+  coord:
+  - 2
+  - -97.8
+  speed_kmh: 3.0
+  length_m: 12.0
+- id: veh_1_0025
+  type: suv
+  lane: 1
+  coord:
+  - 1
+  - -104.9
+  speed_kmh: 6.0
+  length_m: 4.9
+- id: veh_2_0021
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - -108.1
+  speed_kmh: 0.0
+  length_m: 4.6
+- id: veh_2_0023
+  type: van
+  lane: 2
+  coord:
+  - 2
+  - -115.5
+  speed_kmh: 1.0
+  length_m: 5.2
+- id: veh_1_0026
+  type: bus
+  lane: 1
+  coord:
+  - 1
+  - -117.85
+  speed_kmh: 7.0
+  length_m: 13.0
+- id: veh_2_0022
+  type: suv
+  lane: 2
+  coord:
+  - 2
+  - 117.97
+  speed_kmh: 25.3
+  length_m: 4.9
+- id: veh_2_0027
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - -122.4
+  speed_kmh: 2.0
+  length_m: 4.6
+- id: veh_1_0012
+  type: bus
+  lane: 1
+  coord:
+  - 1
+  - 126.66
+  speed_kmh: 62.0
+  length_m: 13.0
+- id: veh_2_0028
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - -129.0
+  speed_kmh: 3.0
+  length_m: 4.6
+- id: veh_1_0027
+  type: suv
+  lane: 1
+  coord:
+  - 1
+  - -129.3
+  speed_kmh: 0.0
+  length_m: 4.9
+- id: veh_2_0024
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - 130.8
+  speed_kmh: 24.3
+  length_m: 4.6
+- id: veh_1_0028
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - -136.05
+  speed_kmh: 0.0
+  length_m: 4.6
+- id: veh_2_0025
+  type: van
+  lane: 2
+  coord:
+  - 2
+  - 140.49
+  speed_kmh: 23.3
+  length_m: 5.2
+- id: veh_2_0030
+  type: truck
+  lane: 2
+  coord:
+  - 2
+  - -141.3
+  speed_kmh: 0.0
+  length_m: 12.0
+- id: veh_1_0029
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - -142.65
+  speed_kmh: 1.0
+  length_m: 4.6
+- id: veh_2_0032
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - -151.6
+  speed_kmh: 1.0
+  length_m: 4.6
+- id: veh_2_0026
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - 153.27
+  speed_kmh: 22.3
+  length_m: 4.6
+- id: veh_1_0030
+  type: truck
+  lane: 1
+  coord:
+  - 1
+  - -154.95
+  speed_kmh: 0.0
+  length_m: 12.0
+- id: veh_1_0015
+  type: truck
+  lane: 1
+  coord:
+  - 1
+  - 158.33
+  speed_kmh: 61.0
+  length_m: 12.0
+- id: veh_2_0033
+  type: van
+  lane: 2
+  coord:
+  - 2
+  - -159.0
+  speed_kmh: 2.0
+  length_m: 5.2
+- id: veh_2_0029
+  type: suv
+  lane: 2
+  coord:
+  - 2
+  - 162.88
+  speed_kmh: 21.3
+  length_m: 4.9
+- id: veh_2_0034
+  type: suv
+  lane: 2
+  coord:
+  - 2
+  - -166.55
+  speed_kmh: 0.0
+  length_m: 4.9
+- id: veh_1_0031
+  type: bus
+  lane: 1
+  coord:
+  - 1
+  - -171.45
+  speed_kmh: 0.0
+  length_m: 13.0
+- id: veh_2_0031
+  type: bus
+  lane: 2
+  coord:
+  - 2
+  - 175.61
+  speed_kmh: 25.3
+  length_m: 13.0
+- id: veh_2_0036
+  type: truck
+  lane: 2
+  coord:
+  - 2
+  - -179.0
+  speed_kmh: 1.0
+  length_m: 12.0
+- id: veh_2_0038
+  type: van
+  lane: 2
+  coord:
+  - 2
+  - -190.1
+  speed_kmh: 0.0
+  length_m: 5.2
+- id: veh_1_0017
+  type: truck
+  lane: 1
+  coord:
+  - 1
+  - 192.6
+  speed_kmh: 60.0
+  length_m: 12.0
+- id: veh_2_0035
+  type: truck
+  lane: 2
+  coord:
+  - 2
+  - 196.72
+  speed_kmh: 24.3
+  length_m: 12.0
+- id: veh_2_0040
+  type: truck
+  lane: 2
+  coord:
+  - 2
+  - -202.7
+  speed_kmh: 1.0
+  length_m: 12.0
+- id: veh_2_0037
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - 215.75
+  speed_kmh: 27.0
+  length_m: 4.6
+- id: veh_2_0039
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - 226.27
+  speed_kmh: 26.0
+  length_m: 4.6
+- id: veh_1_0019
+  type: suv
+  lane: 1
+  coord:
+  - 1
+  - 233.04
+  speed_kmh: 59.0
+  length_m: 4.9
+- id: veh_1_0021
+  type: suv
+  lane: 1
+  coord:
+  - 1
+  - 254.25
+  speed_kmh: 58.0
+  length_m: 4.9
+- id: veh_1_0022
+  type: truck
+  lane: 1
+  coord:
+  - 1
+  - 269.36
+  speed_kmh: 57.0
+  length_m: 12.0
+```
+>>> sending next scene: E:\repos\LLM_traffic_query\scenes\jam_2.yaml
+
+
+[DEBUG] response_id: resp_0b7bf793a48306ac0068f9e8996308819cb9229caa89a5f46e
+
+
+[RECV <- LLM] RESPONSE (simulated)
+
+```yaml
+result:
+  classification: wide moving jam
+  reasons:
+    - Many vehicles in all lanes stopped or <5 km/h, forming dense queue
+    - Jam stretches over >150 m (coords –6 to –202), typical wide jam length
+    - Sharp speed jump to 20–60 km/h just ahead of jam indicates downstream front
+    - Upstream vehicles still slowing to 0 km/h, showing backward-propagating front
+    - Absence of uniformly moderate speeds rules out synchronized flow
+```
+
+Enter LLM response type [good | incomplete | bad_result | incomplete_reasoning | bad_reasoning | quit]:
+> >>> sending next scene: E:\repos\LLM_traffic_query\scenes\jam_3.yaml
+[INFO] Injected scenario: jam_3.yaml
+
+[SEND -> LLM] RESPONSE PROMPT (good)
+
+Your previous analysis is correct and sound.
+Now here is the next traffic scenario for you to analyze.
+You should analyze it carefully with the same task and provide your answer
+in the same designated markdown format.
+Here is a traffic scenario to analyze.
+Analyze the traffic scenario carefully and classify it as a traffic phase class according to the rules below.
+Remember that you should provide your answer in the instructed yaml format.
+
+Traffic Scenario:
+```yaml
+vehicles:
+- id: veh_2_0002
+  type: van
+  lane: 2
+  coord:
+  - 2
+  - -7.4
+  speed_kmh: 28.3
+  length_m: 5.2
+- id: veh_3_0001
+  type: maintenance
+  lane: 3
+  coord:
+  - 3
+  - -9.0
+  speed_kmh: 0.0
+  length_m: 6.0
+- id: veh_3_0003
+  type: maintenance
+  lane: 3
+  coord:
+  - 3
+  - 9.59
+  speed_kmh: 11.2
+  length_m: 6.0
+- id: veh_1_0003
+  type: truck
+  lane: 1
+  coord:
+  - 1
+  - -11.9
+  speed_kmh: 22.2
+  length_m: 12.0
+- id: veh_2_0001
+  type: suv
+  lane: 2
+  coord:
+  - 2
+  - 14.39
+  speed_kmh: 59.0
+  length_m: 4.9
+- id: veh_2_0003
+  type: suv
+  lane: 2
+  coord:
+  - 2
+  - -14.95
+  speed_kmh: 15.8
+  length_m: 4.9
+- id: veh_1_0001
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - 17.51
+  speed_kmh: 67.0
+  length_m: 4.6
+- id: veh_3_0002
+  type: maintenance
+  lane: 3
+  coord:
+  - 3
+  - -18.0
+  speed_kmh: 1.0
+  length_m: 6.0
+- id: veh_2_0005
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - -21.7
+  speed_kmh: 0.0
+  length_m: 4.6
+- id: veh_1_0005
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - -22.4
+  speed_kmh: 16.5
+  length_m: 4.6
+- id: veh_2_0008
+  type: suv
+  lane: 2
+  coord:
+  - 2
+  - -28.95
+  speed_kmh: 1.0
+  length_m: 4.9
+- id: veh_2_0004
+  type: truck
+  lane: 2
+  coord:
+  - 2
+  - 29.43
+  speed_kmh: 58.0
+  length_m: 12.0
+- id: veh_1_0002
+  type: suv
+  lane: 1
+  coord:
+  - 1
+  - 32.66
+  speed_kmh: 66.0
+  length_m: 4.9
+- id: veh_2_0010
+  type: suv
+  lane: 2
+  coord:
+  - 2
+  - -36.35
+  speed_kmh: 0.0
+  length_m: 4.9
+- id: veh_1_0008
+  type: truck
+  lane: 1
+  coord:
+  - 1
+  - -38.93
+  speed_kmh: 17.5
+  length_m: 12.0
+- id: veh_2_0011
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - -43.1
+  speed_kmh: 1.0
+  length_m: 4.6
+- id: veh_1_0010
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - -49.23
+  speed_kmh: 0.0
+  length_m: 4.6
+- id: veh_2_0013
+  type: suv
+  lane: 2
+  coord:
+  - 2
+  - -50.35
+  speed_kmh: 2.0
+  length_m: 4.9
+- id: veh_1_0004
+  type: van
+  lane: 1
+  coord:
+  - 1
+  - 52.94
+  speed_kmh: 65.0
+  length_m: 5.2
+- id: veh_1_0013
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - -55.83
+  speed_kmh: 1.0
+  length_m: 4.6
+- id: veh_2_0015
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - -57.1
+  speed_kmh: 3.0
+  length_m: 4.6
+- id: veh_1_0015
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - -62.43
+  speed_kmh: 2.0
+  length_m: 4.6
+- id: veh_2_0017
+  type: truck
+  lane: 2
+  coord:
+  - 2
+  - -69.4
+  speed_kmh: 4.0
+  length_m: 12.0
+- id: veh_2_0006
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - 70.09
+  speed_kmh: 57.0
+  length_m: 4.6
+- id: veh_1_0006
+  type: truck
+  lane: 1
+  coord:
+  - 1
+  - 70.47
+  speed_kmh: 64.0
+  length_m: 12.0
+- id: veh_1_0017
+  type: truck
+  lane: 1
+  coord:
+  - 1
+  - -74.73
+  speed_kmh: 3.0
+  length_m: 12.0
+- id: veh_2_0018
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - -79.7
+  speed_kmh: 5.0
+  length_m: 4.6
+- id: veh_2_0007
+  type: suv
+  lane: 2
+  coord:
+  - 2
+  - 84.14
+  speed_kmh: 56.0
+  length_m: 4.9
+- id: veh_1_0018
+  type: van
+  lane: 1
+  coord:
+  - 1
+  - -85.83
+  speed_kmh: 4.0
+  length_m: 5.2
+- id: veh_1_0019
+  type: truck
+  lane: 1
+  coord:
+  - 1
+  - -98.43
+  speed_kmh: 5.0
+  length_m: 12.0
+- id: veh_2_0009
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - 106.05
+  speed_kmh: 55.0
+  length_m: 4.6
+- id: veh_1_0007
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - 115.69
+  speed_kmh: 63.0
+  length_m: 4.6
+- id: veh_2_0012
+  type: bus
+  lane: 2
+  coord:
+  - 2
+  - 116.85
+  speed_kmh: 54.0
+  length_m: 13.0
+- id: veh_1_0009
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - 132.33
+  speed_kmh: 62.0
+  length_m: 4.6
+- id: veh_1_0011
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - 148.79
+  speed_kmh: 61.0
+  length_m: 4.6
+- id: veh_2_0014
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - 152.11
+  speed_kmh: 53.0
+  length_m: 4.6
+- id: veh_1_0012
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - 165.07
+  speed_kmh: 60.0
+  length_m: 4.6
+- id: veh_2_0016
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - 166.99
+  speed_kmh: 52.0
+  length_m: 4.6
+- id: veh_1_0014
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - 181.18
+  speed_kmh: 59.0
+  length_m: 4.6
+- id: veh_1_0016
+  type: truck
+  lane: 1
+  coord:
+  - 1
+  - 191.48
+  speed_kmh: 58.0
+  length_m: 12.0
+```
+>>> sending next scene: E:\repos\LLM_traffic_query\scenes\jam_3.yaml
+
+
+[DEBUG] response_id: resp_0b7bf793a48306ac0068f9e8ba28b4819cb799aaeee444f1c6
+
+
+[RECV <- LLM] RESPONSE (simulated)
+
+```yaml
+result:
+  classification: wide moving jam
+  reasons:
+    - Dozens of vehicles between –20 and –100 m moving 0–5 km/h, forming dense queue
+    - Abrupt speed jump to 50–67 km/h at +10 m and beyond marks downstream jam front
+    - Slow / stopped vehicles continue upstream to –100 m, indicating backward-propagating jam
+    - Presence of near-zero speeds rules out synchronized flow with continuous movement
+    - Free-flow impossible: average downstream speed only ~60 km/h, far below typical 100 km/h
+```
+
+Enter LLM response type [good | incomplete | bad_result | incomplete_reasoning | bad_reasoning | quit]:
+> >>> sending next scene: E:\repos\LLM_traffic_query\scenes\free_1.yaml
+[INFO] Injected scenario: free_1.yaml
+
+[SEND -> LLM] RESPONSE PROMPT (good)
+
+Your previous analysis is correct and sound.
+Now here is the next traffic scenario for you to analyze.
+You should analyze it carefully with the same task and provide your answer
+in the same designated markdown format.
+Here is a traffic scenario to analyze.
+Analyze the traffic scenario carefully and classify it as a traffic phase class according to the rules below.
+Remember that you should provide your answer in the instructed yaml format.
+
+Traffic Scenario:
+```yaml
+vehicles:
+- id: veh_3_0001
+  type: maintenance
+  lane: 3
+  coord:
+  - 3
+  - -9.5
+  speed_kmh: 2.0
+  length_m: 6.0
+- id: veh_1_0003
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - 19.0
+  speed_kmh: 130.0
+  length_m: 4.6
+- id: veh_3_0002
+  type: maintenance
+  lane: 3
+  coord:
+  - 3
+  - -19.7
+  speed_kmh: 0.6
+  length_m: 6.0
+- id: veh_2_0001
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - 41.05
+  speed_kmh: 115.0
+  length_m: 4.6
+- id: veh_1_0001
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - -42.09
+  speed_kmh: 125.0
+  length_m: 4.6
+- id: veh_2_0002
+  type: truck
+  lane: 2
+  coord:
+  - 2
+  - -42.3
+  speed_kmh: 85.6
+  length_m: 12.0
+- id: veh_2_0004
+  type: truck
+  lane: 2
+  coord:
+  - 2
+  - 52.15
+  speed_kmh: 110.0
+  length_m: 12.0
+- id: veh_2_0003
+  type: suv
+  lane: 2
+  coord:
+  - 2
+  - -60.14
+  speed_kmh: 90.6
+  length_m: 4.9
+- id: veh_1_0002
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - -86.27
+  speed_kmh: 130.0
+  length_m: 4.6
+- id: veh_1_0004
+  type: suv
+  lane: 1
+  coord:
+  - 1
+  - -144.34
+  speed_kmh: 126.9
+  length_m: 4.9
+```
+>>> sending next scene: E:\repos\LLM_traffic_query\scenes\free_1.yaml
+
+
+[DEBUG] response_id: resp_0b7bf793a48306ac0068f9e9247f6c819c87d9e823dcfad06f
+
+
+[RECV <- LLM] RESPONSE (simulated)
+
+```yaml
+result:
+  classification: free flow
+  reasons:
+    - Main-lane vehicles at 85–130 km/h, near desired autobahn speeds
+    - Only two slow maintenance vehicles in lane 3, not affecting flow
+    - Large longitudinal gaps; overall vehicle density very low
+    - No continuous speed reduction or platooning typical of synchronized flow
+    - No stopped queue or backward-moving jam front observed
+```
+
+Enter LLM response type [good | incomplete | bad_result | incomplete_reasoning | bad_reasoning | quit]:
+> >>> sending next scene: E:\repos\LLM_traffic_query\scenes\sync_2.yaml
+[INFO] Injected scenario: sync_2.yaml
+
+[SEND -> LLM] RESPONSE PROMPT (good)
+
+Your previous analysis is correct and sound.
+Now here is the next traffic scenario for you to analyze.
+You should analyze it carefully with the same task and provide your answer
+in the same designated markdown format.
+Here is a traffic scenario to analyze.
+Analyze the traffic scenario carefully and classify it as a traffic phase class according to the rules below.
+Remember that you should provide your answer in the instructed yaml format.
+
+Traffic Scenario:
+```yaml
+vehicles:
+- id: veh_1_0001
+  type: van
+  lane: 1
+  coord:
+  - 1
+  - 11.97
+  speed_kmh: 110.2
+  length_m: 5.2
+- id: veh_2_0001
+  type: van
+  lane: 2
+  coord:
+  - 2
+  - 12.16
+  speed_kmh: 108.0
+  length_m: 5.2
+- id: veh_1_0005
+  type: bus
+  lane: 1
+  coord:
+  - 1
+  - 26.47
+  speed_kmh: 108.2
+  length_m: 13.0
+- id: veh_2_0002
+  type: truck
+  lane: 2
+  coord:
+  - 2
+  - -27.78
+  speed_kmh: 76.5
+  length_m: 12.0
+- id: veh_2_0004
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - -38.38
+  speed_kmh: 78.5
+  length_m: 4.6
+- id: veh_1_0002
+  type: truck
+  lane: 1
+  coord:
+  - 1
+  - -38.86
+  speed_kmh: 84.6
+  length_m: 12.0
+- id: veh_1_0003
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - -49.46
+  speed_kmh: 86.6
+  length_m: 4.6
+- id: veh_2_0003
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - 63.39
+  speed_kmh: 106.0
+  length_m: 4.6
+- id: veh_2_0005
+  type: suv
+  lane: 2
+  coord:
+  - 2
+  - -70.58
+  speed_kmh: 80.5
+  length_m: 4.9
+- id: veh_1_0006
+  type: truck
+  lane: 1
+  coord:
+  - 1
+  - 75.06
+  speed_kmh: 106.2
+  length_m: 12.0
+- id: veh_2_0007
+  type: van
+  lane: 2
+  coord:
+  - 2
+  - 75.87
+  speed_kmh: 104.0
+  length_m: 5.2
+- id: veh_1_0004
+  type: suv
+  lane: 1
+  coord:
+  - 1
+  - -84.71
+  speed_kmh: 88.6
+  length_m: 4.9
+- id: veh_2_0006
+  type: motorcycle
+  lane: 2
+  coord:
+  - 2
+  - -89.07
+  speed_kmh: 82.5
+  length_m: 2.2
+- id: veh_2_0009
+  type: van
+  lane: 2
+  coord:
+  - 2
+  - -123.05
+  speed_kmh: 84.5
+  length_m: 5.2
+- id: veh_2_0008
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - 124.88
+  speed_kmh: 102.0
+  length_m: 4.6
+- id: veh_1_0009
+  type: truck
+  lane: 1
+  coord:
+  - 1
+  - 128.69
+  speed_kmh: 104.2
+  length_m: 12.0
+- id: veh_1_0007
+  type: truck
+  lane: 1
+  coord:
+  - 1
+  - -135.67
+  speed_kmh: 80.7
+  length_m: 12.0
+- id: veh_2_0011
+  type: suv
+  lane: 2
+  coord:
+  - 2
+  - -148.63
+  speed_kmh: 86.5
+  length_m: 4.9
+- id: veh_2_0010
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - 150.2
+  speed_kmh: 100.0
+  length_m: 4.6
+- id: veh_2_0012
+  type: bus
+  lane: 2
+  coord:
+  - 2
+  - 161.1
+  speed_kmh: 98.0
+  length_m: 13.0
+- id: veh_1_0008
+  type: bus
+  lane: 1
+  coord:
+  - 1
+  - -176.19
+  speed_kmh: 82.7
+  length_m: 13.0
+- id: veh_2_0013
+  type: van
+  lane: 2
+  coord:
+  - 2
+  - -185.6
+  speed_kmh: 88.5
+  length_m: 5.2
+- id: veh_1_0010
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - -187.29
+  speed_kmh: 84.7
+  length_m: 4.6
+- id: veh_2_0014
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - -198.92
+  speed_kmh: 90.5
+  length_m: 4.6
+- id: veh_1_0011
+  type: van
+  lane: 1
+  coord:
+  - 1
+  - 202.33
+  speed_kmh: 102.2
+  length_m: 5.2
+- id: veh_1_0013
+  type: van
+  lane: 1
+  coord:
+  - 1
+  - 237.75
+  speed_kmh: 100.2
+  length_m: 5.2
+- id: veh_1_0012
+  type: truck
+  lane: 1
+  coord:
+  - 1
+  - -247.22
+  speed_kmh: 81.7
+  length_m: 12.0
+- id: veh_1_0015
+  type: suv
+  lane: 1
+  coord:
+  - 1
+  - 261.95
+  speed_kmh: 114.6
+  length_m: 4.9
+- id: veh_1_0014
+  type: truck
+  lane: 1
+  coord:
+  - 1
+  - -285.75
+  speed_kmh: 79.7
+  length_m: 12.0
+- id: veh_1_0016
+  type: motorcycle
+  lane: 1
+  coord:
+  - 1
+  - -294.43
+  speed_kmh: 81.7
+  length_m: 2.2
+```
+>>> sending next scene: E:\repos\LLM_traffic_query\scenes\sync_2.yaml
+
+
+[DEBUG] response_id: resp_0b7bf793a48306ac0068f9e93d7160819c8aa976cdb0b7d1f6
+
+
+[RECV <- LLM] RESPONSE (simulated)
+
+```yaml
+result:
+  classification: free flow
+  reasons:
+    - Every vehicle travels 76–115 km/h, far above congested-flow range
+    - No stopped or crawling vehicles; zero evidence of queue formation
+    - Large longitudinal spread (≈580 m) with wide gaps implies low density
+    - Two lanes keep distinct speed tiers (trucks slower), showing minimal interaction
+    - Absence of uniform speed reduction or platoon compression rules out synchronized flow and jams
+```
+
+Enter LLM response type [good | incomplete | bad_result | incomplete_reasoning | bad_reasoning | quit]:
+> 
+[SEND -> LLM] RESPONSE PROMPT (bad_reasoning)
+
+Your previous analysis had mistakes in reasoning.
+Specifically: generated by third party scripts.
+I would like to re-emphasize the rules and tasks: Here are the important and brief rules to follow strictly as you are unable to reason in a sound way:
+- Analyze traffic scenarios and classify them into one of three traffic phase classes: free flow, synchronized flow, or wide moving jam due to three-phase traffic theory.
+- Consider speed, density, inter-vehicle distances as important factors in your analysis.
+- Provide your analysis in yaml format with classification and reasons.
+- Ensure each reason is concise (no more than 20 words) and clearly justifies your classification.
+- Use only ASCII characters in your response..
+First, briefly list the reasoning mistakes or deviations from the designated tasks in your previous answer.
+Then, Please reconsider the previous traffic scenario and provide your answer in the same instructed markdown format.
+>>> sending next scene: E:\repos\LLM_traffic_query\scenes\sync_2.yaml
+
+
+[DEBUG] response_id: resp_0b7bf793a48306ac0068f9e9b41108819ca623c3ed14cbd179
+
+
+[RECV <- LLM] RESPONSE (simulated)
+
+Previous answer issues:
+1. Ignored moderate vehicle density across 600 m stretch.
+2. Overlooked many cars at 76–90 km/h, below free-flow norm.
+3. Claimed “wide gaps”; actual headways often <30 m.
+4. Missed speed harmonization between lanes, sign of synchronization.
+5. Conflated absence of jams with free-flow classification.
+
+```yaml
+result:
+  classification: synchronized flow
+  reasons:
+    - Speeds cluster 76–110 km/h, lower than desired 100–150 km/h
+    - Adjacent lanes exhibit nearly equal speeds, showing coupling
+    - Continuous sequence of vehicles, headways around 20–40 m, moderate density
+    - No standing queue or backward-moving stop line, excluding wide moving jam
+    - Movement constrained yet steady, hallmark of synchronized flow
+```
+
+Enter LLM response type [good | incomplete | bad_result | incomplete_reasoning | bad_reasoning | quit]:
+> >>> sending next scene: E:\repos\LLM_traffic_query\scenes\sync_3.yaml
+[INFO] Injected scenario: sync_3.yaml
+
+[SEND -> LLM] RESPONSE PROMPT (good)
+
+Your previous analysis is correct and sound.
+Now here is the next traffic scenario for you to analyze.
+You should analyze it carefully with the same task and provide your answer
+in the same designated markdown format.
+Here is a traffic scenario to analyze.
+Analyze the traffic scenario carefully and classify it as a traffic phase class according to the rules below.
+Remember that you should provide your answer in the instructed yaml format.
+
+Traffic Scenario:
+```yaml
+vehicles:
+- id: veh_3_0001
+  type: maintenance
+  lane: 3
+  coord:
+  - 3
+  - 10.17
+  speed_kmh: 8.7
+  length_m: 6.0
+- id: veh_1_0002
+  type: van
+  lane: 1
+  coord:
+  - 1
+  - 11.97
+  speed_kmh: 110.2
+  length_m: 5.2
+- id: veh_3_0002
+  type: maintenance
+  lane: 3
+  coord:
+  - 3
+  - 19.71
+  speed_kmh: 10.3
+  length_m: 6.0
+- id: veh_1_0001
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - -23.8
+  speed_kmh: 112.3
+  length_m: 4.6
+- id: veh_1_0004
+  type: truck
+  lane: 1
+  coord:
+  - 1
+  - 25.97
+  speed_kmh: 108.2
+  length_m: 12.0
+- id: veh_2_0002
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - 26.86
+  speed_kmh: 108.0
+  length_m: 4.6
+- id: veh_2_0001
+  type: van
+  lane: 2
+  coord:
+  - 2
+  - -31.82
+  speed_kmh: 98.0
+  length_m: 5.2
+- id: veh_2_0005
+  type: motorcycle
+  lane: 2
+  coord:
+  - 2
+  - 45.82
+  speed_kmh: 106.0
+  length_m: 2.2
+- id: veh_2_0007
+  type: truck
+  lane: 2
+  coord:
+  - 2
+  - 54.49
+  speed_kmh: 104.0
+  length_m: 12.0
+- id: veh_1_0003
+  type: truck
+  lane: 1
+  coord:
+  - 1
+  - -63.5
+  speed_kmh: 84.2
+  length_m: 12.0
+- id: veh_2_0003
+  type: truck
+  lane: 2
+  coord:
+  - 2
+  - -67.76
+  speed_kmh: 81.1
+  length_m: 12.0
+- id: veh_1_0005
+  type: motorcycle
+  lane: 1
+  coord:
+  - 1
+  - -72.37
+  speed_kmh: 86.2
+  length_m: 2.2
+- id: veh_2_0004
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - -78.36
+  speed_kmh: 83.1
+  length_m: 4.6
+- id: veh_1_0006
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - -89.85
+  speed_kmh: 88.2
+  length_m: 4.6
+- id: veh_2_0006
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - -100.62
+  speed_kmh: 85.1
+  length_m: 4.6
+- id: veh_1_0007
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - 111.18
+  speed_kmh: 112.6
+  length_m: 4.6
+- id: veh_1_0009
+  type: suv
+  lane: 1
+  coord:
+  - 1
+  - -125.71
+  speed_kmh: 90.2
+  length_m: 4.9
+- id: veh_2_0009
+  type: suv
+  lane: 2
+  coord:
+  - 2
+  - 135.34
+  speed_kmh: 102.0
+  length_m: 4.9
+- id: veh_1_0008
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - 138.74
+  speed_kmh: 110.6
+  length_m: 4.6
+- id: veh_2_0011
+  type: maintenance
+  lane: 2
+  coord:
+  - 2
+  - 143.41
+  speed_kmh: 100.0
+  length_m: 6.0
+- id: veh_1_0010
+  type: truck
+  lane: 1
+  coord:
+  - 1
+  - 149.34
+  speed_kmh: 108.6
+  length_m: 12.0
+- id: veh_2_0008
+  type: truck
+  lane: 2
+  coord:
+  - 2
+  - -155.95
+  speed_kmh: 79.1
+  length_m: 12.0
+- id: veh_2_0010
+  type: suv
+  lane: 2
+  coord:
+  - 2
+  - -169.55
+  speed_kmh: 81.1
+  length_m: 4.9
+- id: veh_1_0011
+  type: bus
+  lane: 1
+  coord:
+  - 1
+  - -175.88
+  speed_kmh: 83.7
+  length_m: 13.0
+- id: veh_1_0012
+  type: van
+  lane: 1
+  coord:
+  - 1
+  - -194.47
+  speed_kmh: 85.7
+  length_m: 5.2
+- id: veh_2_0012
+  type: suv
+  lane: 2
+  coord:
+  - 2
+  - -198.98
+  speed_kmh: 83.1
+  length_m: 4.9
+- id: veh_2_0014
+  type: van
+  lane: 2
+  coord:
+  - 2
+  - 204.19
+  speed_kmh: 98.6
+  length_m: 5.2
+- id: veh_1_0013
+  type: sedan
+  lane: 1
+  coord:
+  - 1
+  - 237.79
+  speed_kmh: 110.2
+  length_m: 4.6
+- id: veh_1_0015
+  type: bus
+  lane: 1
+  coord:
+  - 1
+  - -238.94
+  speed_kmh: 80.9
+  length_m: 13.0
+- id: veh_2_0016
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - 250.48
+  speed_kmh: 96.6
+  length_m: 4.6
+- id: veh_2_0013
+  type: truck
+  lane: 2
+  coord:
+  - 2
+  - -252.87
+  speed_kmh: 79.7
+  length_m: 12.0
+- id: veh_1_0014
+  type: suv
+  lane: 1
+  coord:
+  - 1
+  - 254.22
+  speed_kmh: 112.0
+  length_m: 4.9
+- id: veh_2_0015
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - -263.27
+  speed_kmh: 81.7
+  length_m: 4.6
+- id: veh_1_0016
+  type: bus
+  lane: 1
+  coord:
+  - 1
+  - 266.0
+  speed_kmh: 110.0
+  length_m: 13.0
+- id: veh_2_0017
+  type: suv
+  lane: 2
+  coord:
+  - 2
+  - 266.26
+  speed_kmh: 98.5
+  length_m: 4.9
+- id: veh_2_0018
+  type: truck
+  lane: 2
+  coord:
+  - 2
+  - 277.53
+  speed_kmh: 96.5
+  length_m: 12.0
+- id: veh_1_0017
+  type: bus
+  lane: 1
+  coord:
+  - 1
+  - -277.91
+  speed_kmh: 81.6
+  length_m: 13.0
+- id: veh_2_0019
+  type: sedan
+  lane: 2
+  coord:
+  - 2
+  - -285.06
+  speed_kmh: 83.7
+  length_m: 4.6
+```
+>>> sending next scene: E:\repos\LLM_traffic_query\scenes\sync_3.yaml
+
+
+[DEBUG] response_id: resp_0b7bf793a48306ac0068f9e9eaedd8819ca4d0524f627c3114
+
+
+[RECV <- LLM] RESPONSE (simulated)
+
+```yaml
+result:
+  classification: synchronized flow
+  reasons:
+    - Large platoons in both lanes travel 80–90 km/h, below desired free-flow speed
+    - Adjacent lanes exhibit matched speeds, indicating strong lane coupling
+    - Headways roughly 15–40 m over long stretch, showing moderate density
+    - No stopped queue or speed near zero, excluding wide moving jam
+    - Speeds remain steady without large gaps, unlike dispersed free flow
+```
+
+Enter LLM response type [good | incomplete | bad_result | incomplete_reasoning | bad_reasoning | quit]:
+> 
+[SESSION] Exiting on user request.
+
+[SESSION] Complete. Log written to: E:\repos\LLM_traffic_query\out.txt

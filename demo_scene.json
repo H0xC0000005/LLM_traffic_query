@@ -1,0 +1,94 @@
+{
+  "meta": {
+    "phase": "free",
+    "window_m": 200.0,
+    "right_driving": true,
+    "lanes": {
+      "1": {
+        "type": "driving",
+        "speed_limit_kmh": 130
+      },
+      "2": {
+        "type": "driving",
+        "speed_limit_kmh": 110
+      },
+      "3": {
+        "type": "emergency",
+        "speed_limit_kmh": 30
+      }
+    }
+  },
+  "ego": {
+    "coord": [
+      2,
+      0.0
+    ],
+    "speed_kmh": 100.0,
+    "type": "ego"
+  },
+  "vehicles": [
+    {
+      "id": "v4",
+      "type": "sedan",
+      "coord": [
+        1,
+        -4.53
+      ],
+      "speed_kmh": 128.9
+    },
+    {
+      "id": "v1",
+      "type": "truck",
+      "coord": [
+        1,
+        8.85
+      ],
+      "speed_kmh": 93.0
+    },
+    {
+      "id": "v2",
+      "type": "sedan",
+      "coord": [
+        1,
+        24.3
+      ],
+      "speed_kmh": 103.0
+    },
+    {
+      "id": "v3",
+      "type": "sedan",
+      "coord": [
+        1,
+        40.39
+      ],
+      "speed_kmh": 113.0
+    },
+    {
+      "id": "v7",
+      "type": "truck",
+      "coord": [
+        2,
+        -76.85
+      ],
+      "speed_kmh": 94.7
+    },
+    {
+      "id": "v6",
+      "type": "sedan",
+      "coord": [
+        2,
+        -30.21
+      ],
+      "speed_kmh": 110.0
+    },
+    {
+      "id": "v5",
+      "type": "sedan",
+      "coord": [
+        2,
+        31.86
+      ],
+      "speed_kmh": 110.0
+    }
+  ]
+}
