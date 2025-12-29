@@ -27,9 +27,9 @@ import traci  # noqa: E402
 from sumolib import checkBinary  # noqa: E402
 
 from dqn_agent import DQNAgent
-from scene_encoder import encode_tsc_state_vector  # unchanged encoder
-from utility import reward_avg_queue_from_encoded_state  # your reward from encoded state
-from utility import throughput_tracker_step, reward_throughput_per_second_on_decision
+from scene_encoder import encode_tsc_state_vector, encode_tsc_state_vector_bounded  # unchanged encoder
+from utility import throughput_tracker_step
+from utility import reward_throughput_plus_top2_queue
 
 
 @dataclass
@@ -128,6 +128,16 @@ def run_dqn_tsc(
     target_update_every: int = 1_000,     # hard update steps
     tb_logdir: str = "runs",
     tb_run_name: Optional[str] = None,
+    # ---- reward params (NEW) ----
+    throughput_ref_veh_per_s: float = 0.30,
+    queue_ref_veh: float = 15.0,
+    w_throughput: float = 1.0,
+    w_queue: float = 1.0,
+    queue_power: float = 1.0,
+    top2_w1: float = 0.7,
+    top2_w2: float = 0.3,
+    reward_clip_lo: float = -1.0,
+    reward_clip_hi: float = 1.0,
 ) -> None:
     if tb_run_name is None:
         tb_run_name = f"sumo_dqn_seed{seed}_{int(time.time())}"
@@ -166,7 +176,13 @@ def run_dqn_tsc(
                     if st.pending_state is None or st.pending_action is None:
                         continue
 
-                    terminal_state = encode_tsc_state_vector(
+                    # terminal_state = encode_tsc_state_vector(
+                    #     tls_id,
+                    #     moving_speed_threshold=0.1,
+                    #     stopped_speed_threshold=0.1,
+                    #     cache=encoder_cache_by_tls[tls_id],
+                    # ).astype(np.float32)
+                    terminal_state = encode_tsc_state_vector_bounded(
                         tls_id,
                         moving_speed_threshold=0.1,
                         stopped_speed_threshold=0.1,
@@ -176,9 +192,27 @@ def run_dqn_tsc(
                     # num_lanes = len(encoder_cache_by_tls[tls_id].get("lane_ids", []))
                     # r = reward_avg_queue_from_encoded_state(terminal_state, num_lanes=num_lanes)
                     # reward is throughput (veh/s) since last decision up to terminal sim_t
-                    r = reward_throughput_per_second_on_decision(
+                    # r = reward_throughput_per_second_on_decision(
+                    #     sim_time=sim_t,
+                    #     cache=encoder_cache_by_tls[tls_id],
+                    # )
+                    num_lanes = len(encoder_cache_by_tls[tls_id].get("lane_ids", []))
+                    if num_lanes <= 0:
+                        raise RuntimeError(f"encoder cache missing lane_ids for tls={tls_id}")
+
+                    r = reward_throughput_plus_top2_queue(
+                        tls_id=tls_id,
                         sim_time=sim_t,
+                        state_vec=terminal_state,
                         cache=encoder_cache_by_tls[tls_id],
+                        num_lanes=num_lanes,
+                        throughput_ref_veh_per_s=throughput_ref_veh_per_s,
+                        queue_ref_veh=queue_ref_veh,
+                        w_throughput=w_throughput,
+                        w_queue=w_queue,
+                        top2_weights=(top2_w1, top2_w2),
+                        queue_power=queue_power,
+                        reward_clip=(reward_clip_lo, reward_clip_hi),
                     )
 
 
@@ -217,9 +251,27 @@ def run_dqn_tsc(
                     # r = reward_avg_queue_from_encoded_state(cur_state, num_lanes=num_lanes)
 
                     # reward is throughput (veh/s) between last decision time and *now*
-                    r = reward_throughput_per_second_on_decision(
+                    # r = reward_throughput_per_second_on_decision(
+                    #     sim_time=sim_t,
+                    #     cache=encoder_cache_by_tls[tls_id],
+                    # )
+                    num_lanes = len(encoder_cache_by_tls[tls_id].get("lane_ids", []))
+                    if num_lanes <= 0:
+                        raise RuntimeError(f"encoder cache missing lane_ids for tls={tls_id}")
+
+                    r = reward_throughput_plus_top2_queue(
+                        tls_id=tls_id,
                         sim_time=sim_t,
+                        state_vec=cur_state,
                         cache=encoder_cache_by_tls[tls_id],
+                        num_lanes=num_lanes,
+                        throughput_ref_veh_per_s=throughput_ref_veh_per_s,
+                        queue_ref_veh=queue_ref_veh,
+                        w_throughput=w_throughput,
+                        w_queue=w_queue,
+                        top2_weights=(top2_w1, top2_w2),
+                        queue_power=queue_power,
+                        reward_clip=(reward_clip_lo, reward_clip_hi),
                     )
 
                     buffers[tls_id].add(st.pending_state, st.pending_action, r, cur_state, done=False)
@@ -273,7 +325,9 @@ def run_dqn_tsc(
             # Accumulate which vehicles newly ENTERED downstream lanes during this step
             for tls_id in tls_ids:
                 throughput_tracker_step(tls_id, encoder_cache_by_tls[tls_id])
-
+    except Exception as e:
+        print(f"[error] Exception during simulation: {e}")
+        raise
     finally:
         writer.flush()
         writer.close()
@@ -284,7 +338,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("-c", "--sumocfg", required=True)
     ap.add_argument("--gui", action="store_true")
-    ap.add_argument("--max-time", type=float, default=300.0)
+    ap.add_argument("--max-time", type=float, default=3000.0)
     ap.add_argument("--seed", type=int, default=123)
     ap.add_argument("--delay-ms", type=int, default=50)
     ap.add_argument("--hold", type=float, default=5.0)
@@ -304,6 +358,17 @@ if __name__ == "__main__":
     ap.add_argument("--device", type=str, default=None, help="e.g. cpu or cuda (optional)")
     ap.add_argument("--tb-logdir", type=str, default="runs", help="TensorBoard log directory")
     ap.add_argument("--tb-run-name", type=str, default=None, help="Optional run name (subfolder)")
+
+    # combined reward options
+    ap.add_argument("--thr-ref", type=float, default=0.30, help="Throughput normalization ref (veh/s)")
+    ap.add_argument("--queue-ref", type=float, default=15.0, help="Queue normalization ref (veh)")
+    ap.add_argument("--w-thr", type=float, default=1.0)
+    ap.add_argument("--w-queue", type=float, default=1.0)
+    ap.add_argument("--queue-power", type=float, default=1.0)
+    ap.add_argument("--top2-w1", type=float, default=0.7)
+    ap.add_argument("--top2-w2", type=float, default=0.3)
+    ap.add_argument("--reward-clip-lo", type=float, default=-1.0)
+    ap.add_argument("--reward-clip-hi", type=float, default=1.0)
     args = ap.parse_args()
 
     run_dqn_tsc(
@@ -325,4 +390,14 @@ if __name__ == "__main__":
         target_update_every=args.target_update,
         tb_logdir=args.tb_logdir,
         tb_run_name=args.tb_run_name,
+
+        throughput_ref_veh_per_s=args.thr_ref,
+        queue_ref_veh=args.queue_ref,
+        w_throughput=args.w_thr,
+        w_queue=args.w_queue,
+        queue_power=args.queue_power,
+        top2_w1=args.top2_w1,
+        top2_w2=args.top2_w2,
+        reward_clip_lo=args.reward_clip_lo,
+        reward_clip_hi=args.reward_clip_hi,
     )

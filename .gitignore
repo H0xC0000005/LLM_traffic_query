@@ -3,3 +3,6 @@
 /plots
 tensorboard_logs
 *.pyc
+
+
+out.txt

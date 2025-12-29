@@ -1,11 +1,39 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
+
+
+
+
+@dataclass
+class RunningQStats:
+    # running mean over q elements seen so far
+    q_sum: float = 0.0
+    q_count: int = 0
+
+    # running maxima
+    q_abs_max: float = 0.0
+    y_abs_max: float = 0.0
+
+    def update(self, q_all: torch.Tensor, y: torch.Tensor) -> None:
+        # q_all: [B, A], y: [B]
+        q_mean_batch = q_all.mean().item()
+        # For running mean over *all q elements* (not mean-of-means):
+        self.q_sum += q_all.sum().item()
+        self.q_count += q_all.numel()
+
+        self.q_abs_max = max(self.q_abs_max, q_all.abs().max().item())
+        self.y_abs_max = max(self.y_abs_max, y.abs().max().item())
+
+    @property
+    def q_mean_running(self) -> float:
+        return self.q_sum / max(1, self.q_count)
 
 
 class DQN(nn.Module):
@@ -38,6 +66,8 @@ class DQNAgent:
     hidden_dim: int = 128
     lr: float = 1e-3
     device: Optional[str] = None
+    log_path: Optional[str] = "out.txt"
+    _log_header_written: bool = False
 
     def __post_init__(self) -> None:
         if self.device is None:
@@ -58,6 +88,9 @@ class DQNAgent:
         self.loss_fn = nn.SmoothL1Loss()  # Huber
 
         self.train_steps: int = 0
+
+        # running aggregation across training
+        self.running_stats = RunningQStats()
 
     @torch.no_grad()
     def act(self, state_vec: np.ndarray, epsilon: float = 0.0) -> int:
@@ -139,4 +172,42 @@ class DQNAgent:
 
         self.train_steps += 1
         self.model.eval()
+
+        # ---- logging ----
+        # per-step stats
+        log = {
+            "step": self.train_steps,
+            "loss": float(loss.detach().cpu().item()),
+            "q_mean": float(q_all.detach().mean().cpu().item()),
+            "q_abs_max": float(q_all.detach().abs().max().cpu().item()),
+            "y_abs_max": float(y.detach().abs().max().cpu().item()),
+        }
+
+        # running aggregation across *entire training so far*
+        self.running_stats.update(q_all.detach(), y.detach())
+        self._append_log_line(log)
+
         return float(loss.detach().cpu().item())
+
+    def _append_log_line(self, log: Dict[str, Any]) -> None:
+        if self.log_path is None:
+            return
+
+        p = Path(self.log_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+
+        fields = [
+            "step",
+            "loss",
+            "q_mean",
+            "q_abs_max",
+            "y_abs_max",
+        ]
+
+        with p.open("a", encoding="utf-8") as f:
+            if not self._log_header_written and (p.stat().st_size == 0):
+                f.write("\t".join(fields) + "\n")
+                self._log_header_written = True
+
+            f.write("\t".join(str(log[k]) for k in fields) + "\n")
+            f.flush()
