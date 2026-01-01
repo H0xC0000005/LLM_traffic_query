@@ -1,9 +1,89 @@
 # utility.py
 
 from __future__ import annotations
-
-from typing import Dict, Optional, Sequence, Set, Tuple
+import numpy as np
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Sequence, Set, Tuple
+from sumolib import checkBinary
 import traci
+
+
+
+
+"""
+essential data structures 
+"""
+
+# -------------------- Fixed-time baseline schedule --------------------
+# Proof-of-concept schedule: list of (phase_index, duration_seconds).
+#
+# IMPORTANT:
+#   - Phase indices must exist in your TLS program.
+#   - If your TLS has different phase ordering, update this list.
+#   - If a phase index is out of range, it will be wrapped modulo action_dim.
+FIXED_SCHEDULE: List[Tuple[int, float]] = [
+    (0, 40.0),
+    (1, 20.0),
+    (2, 40.0),
+    (3, 20.0),
+]
+
+@dataclass
+class TLSControllerState:
+    next_decision_time: float = 0.0
+    pending_state: Optional[np.ndarray] = None
+    pending_action: Optional[int] = None
+    pending_epsilon: float = 0.0
+    in_control_when_pending: bool = False
+    next_target_update_time: float = 0.0
+    # log_step: int = 0
+
+
+"""
+helper functions
+"""
+
+def start_sumo(sumocfg: str, *, gui: bool, delay_ms: int, sumo_seed: int, traffic_scale: float) -> None:
+    binary = checkBinary("sumo-gui" if gui else "sumo")
+    cmd: List[str] = [
+        binary,
+        "-c", sumocfg,
+        "--start",
+        "--no-step-log", "true",
+        "--delay", str(delay_ms),
+        "--seed", str(int(sumo_seed)),
+        "--scale", str(float(traffic_scale)),
+    ]
+    traci.start(cmd)
+
+def get_phase_count(tls_id: str) -> int:
+    current_program = traci.trafficlight.getProgram(tls_id)
+    logics = traci.trafficlight.getAllProgramLogics(tls_id)
+
+    logic = None
+    for lg in logics:
+        try:
+            if lg.getSubID() == current_program:
+                logic = lg
+                break
+        except Exception:
+            if getattr(lg, "programID", None) == current_program:
+                logic = lg
+                break
+    if logic is None:
+        logic = logics[0]
+
+    try:
+        phases = logic.getPhases()
+    except Exception:
+        phases = getattr(logic, "phases")
+    return int(len(phases))
+
+
+"""
+various reward functions
+"""
+
 
 def reward_avg_queue_from_encoded_state(
     state_vec: Sequence[float],
@@ -298,7 +378,7 @@ def reward_throughput_plus_top2_queue(
         clip_nonnegative=True,
     )
     # q_reward is <= 0
-
+    print(f">> reward: thr={thr:.3f} (norm {thr_norm:.3f}), top2_queue_reward={q_reward:.5f}")
     r = float(w_throughput) * thr_norm + float(w_queue) * float(q_reward)
 
     if reward_clip is not None:

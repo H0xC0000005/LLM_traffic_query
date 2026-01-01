@@ -35,20 +35,27 @@ from utility import reward_throughput_plus_top2_queue
 @dataclass
 class TLSControllerState:
     next_decision_time: float = 0.0
+    next_target_update_time: float = 0.0  # seconds
     pending_state: Optional[np.ndarray] = None   # s
     pending_action: Optional[int] = None         # a
     log_step: int = 0   # NEW: per-TLS scalar step for reward logging
 
-
+# ReplayBuffer: store timestamps but still cap by transition count
 class ReplayBuffer:
     def __init__(self, capacity: int):
-        self.buf: Deque[Tuple[np.ndarray, int, float, np.ndarray, float]] = deque(maxlen=capacity)
+        self.capacity = int(capacity)
+        self.buf: Deque[Tuple[float, np.ndarray, int, float, np.ndarray, float]] = deque(maxlen=self.capacity)
 
     def __len__(self) -> int:
         return len(self.buf)
-
-    def add(self, s: np.ndarray, a: int, r: float, s2: np.ndarray, done: bool) -> None:
-        self.buf.append((s, int(a), float(r), s2, 1.0 if done else 0.0))
+    
+    def span_s(self) -> float:
+        if len(self.buf) < 2:
+            return 0.0
+        return float(self.buf[-1][0] - self.buf[0][0])
+    
+    def add(self, t: float, s: np.ndarray, a: int, r: float, s2: np.ndarray, done: bool) -> None:
+        self.buf.append((float(t), s, int(a), float(r), s2, 1.0 if done else 0.0))
 
     def sample(self, batch_size: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         idx = np.random.choice(len(self.buf), size=batch_size, replace=False)
@@ -124,7 +131,6 @@ def run_dqn_tsc(
     buffer_capacity: int = 50_000,
     train_start: int = 2_000,
     batch_size: int = 64,
-    train_freq: int = 1,                 # train every N transitions added
     target_update_every: int = 1_000,     # hard update steps
     tb_logdir: str = "runs",
     tb_run_name: Optional[str] = None,
@@ -216,7 +222,7 @@ def run_dqn_tsc(
                     )
 
 
-                    buffers[tls_id].add(st.pending_state, st.pending_action, r, terminal_state, done=True)
+                    buffers[tls_id].add(sim_t, st.pending_state, st.pending_action, r, cur_state, done=True)
                 break
 
             # Normal step: decide per TLS when prior hold expires
@@ -243,18 +249,12 @@ def run_dqn_tsc(
                         device=device,
                         lr=lr,
                     )
+                    # init sim sec based timer for target updates
+                    st.next_target_update_time = sim_t + float(target_update_every)
                     print(f"[init] tls={tls_id} state_dim={cur_state.shape[0]} action_dim={action_dim}")
 
                 # If we have a previous (s,a) pending, compute reward from current encoded state and store transition
                 if st.pending_state is not None and st.pending_action is not None:
-                    # num_lanes = len(encoder_cache_by_tls[tls_id].get("lane_ids", []))
-                    # r = reward_avg_queue_from_encoded_state(cur_state, num_lanes=num_lanes)
-
-                    # reward is throughput (veh/s) between last decision time and *now*
-                    # r = reward_throughput_per_second_on_decision(
-                    #     sim_time=sim_t,
-                    #     cache=encoder_cache_by_tls[tls_id],
-                    # )
                     num_lanes = len(encoder_cache_by_tls[tls_id].get("lane_ids", []))
                     if num_lanes <= 0:
                         raise RuntimeError(f"encoder cache missing lane_ids for tls={tls_id}")
@@ -274,7 +274,7 @@ def run_dqn_tsc(
                         reward_clip=(reward_clip_lo, reward_clip_hi),
                     )
 
-                    buffers[tls_id].add(st.pending_state, st.pending_action, r, cur_state, done=False)
+                    buffers[tls_id].add(sim_t, st.pending_state, st.pending_action, r, cur_state, done=False)
                     transitions_added += 1
 
                     # tensorboard logging
@@ -283,17 +283,19 @@ def run_dqn_tsc(
                     writer.add_scalar(f"{tls_id}/epsilon", float(eps), st.log_step)  # optional but useful
 
                     # Train (minimal): sample random minibatch from replay
-                    if len(buffers[tls_id]) >= train_start and (transitions_added % train_freq == 0):
+                    if buffers[tls_id].span_s() >= float(train_start) and len(buffers[tls_id]) >= batch_size:
                         batch = buffers[tls_id].sample(batch_size)
                         loss = agents[tls_id].update(batch, gamma=gamma)
 
                         writer.add_scalar(f"{tls_id}/loss", float(loss), agents[tls_id].train_steps)
 
                         # Hard-update target network periodically
-                        if agents[tls_id].train_steps % target_update_every == 0:
+                        # periodic sync: driven by sim seconds (not gradient steps)
+                        if sim_t >= st.next_target_update_time:
                             agents[tls_id].update_target()
+                            st.next_target_update_time = sim_t + float(target_update_every)
 
-                        if agents[tls_id].train_steps % 200 == 0:
+                        if agents[tls_id].train_steps % 50 == 0:
                             print(f"[train] tls={tls_id} step={agents[tls_id].train_steps} loss={loss:.4f} r={r:.3f}")
 
                 # Choose next action using current state

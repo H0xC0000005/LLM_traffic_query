@@ -3,6 +3,7 @@
 /plots
 tensorboard_logs
 *.pyc
-
+dqn_tsc_models
+eval_results
 
 out.txt

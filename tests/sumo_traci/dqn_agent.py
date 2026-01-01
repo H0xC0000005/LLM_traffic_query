@@ -91,6 +91,8 @@ class DQNAgent:
 
         # running aggregation across training
         self.running_stats = RunningQStats()
+        with open(self.log_path, "w", encoding="utf-8") as f:
+            pass  # clear log file
 
     @torch.no_grad()
     def act(self, state_vec: np.ndarray, epsilon: float = 0.0) -> int:
