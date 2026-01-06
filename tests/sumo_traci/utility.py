@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 import numpy as np
+from dataclasses import dataclass, field
+from collections import deque
+from typing import Any, Callable, Deque, Dict, List, Optional, Sequence, Set, Tuple
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Set, Tuple
 from sumolib import checkBinary
 import traci
-
-
 
 
 """
@@ -28,6 +28,7 @@ FIXED_SCHEDULE: List[Tuple[int, float]] = [
     (3, 20.0),
 ]
 
+
 @dataclass
 class TLSControllerState:
     next_decision_time: float = 0.0
@@ -36,25 +37,285 @@ class TLSControllerState:
     pending_epsilon: float = 0.0
     in_control_when_pending: bool = False
     next_target_update_time: float = 0.0
+    pending_segments: Deque[Tuple[int, float]] = field(
+        default_factory=deque
+    )  # (phase_idx, duration_s)
+    segment_end_time: float = 0.0  # when current segment ends
     # log_step: int = 0
+
+
+"""
+phase management (finding out major green phases and register auxilliary phases)
+"""
+
+# [NEW BLOCK] TLS phase-plan helpers (major greens + auxiliary phases)
+
+
+@dataclass(frozen=True)
+class TLSPhasePlan:
+    program_id: str
+    phases: List[Tuple[int, float, str]]  # (idx, duration_s, state_str)
+    major_greens: List[
+        int
+    ]  # indices of "major green" phases (agent actions map to these)
+    owner_major: List[
+        int
+    ]  # owner_major[phase_idx] -> major green phase idx that owns it
+    aux_after_major: Dict[
+        int, List[int]
+    ]  # major green idx -> aux phase indices after it until next major
+    phase_duration: Dict[int, float]  # phase_idx -> configured duration (seconds)
+
+
+def _get_active_program_logic(tls_id: str):
+    """Return the active ProgramLogic object for tls_id."""
+    program_id = traci.trafficlight.getProgram(tls_id)
+    logics = traci.trafficlight.getAllProgramLogics(tls_id)
+
+    logic = None
+    for lg in logics:
+        try:
+            if lg.getSubID() == program_id:
+                logic = lg
+                break
+        except Exception:
+            if getattr(lg, "programID", None) == program_id:
+                logic = lg
+                break
+    if logic is None:
+        logic = logics[0]
+    return program_id, logic
+
+
+def _default_is_major_green(
+    state: str, duration_s: float, *, min_major_green_s: float
+) -> bool:
+    """
+    Heuristic "major green":
+      - contains any green signal (G/g)
+      - contains NO yellow (y/Y)
+      - duration >= min_major_green_s  (filters out short clearance phases)
+    """
+    has_green = ("G" in state) or ("g" in state)
+    has_yellow = ("y" in state) or ("Y" in state)
+    return (
+        has_green
+        and (not has_yellow)
+        and (float(duration_s) >= float(min_major_green_s))
+    )
+
+
+def get_tls_phase_plan(
+    tls_id: str,
+    cache: Dict[str, Any],
+    *,
+    min_major_green_s: float = 5.0,
+    is_major_green: Optional[Callable[[str, float], bool]] = None,
+) -> TLSPhasePlan:
+    """
+    Build (and cache) a relaxed phase plan:
+      - agent chooses only major green phases
+      - any phases between two major greens are treated as auxiliary phases owned by the earlier major green
+    """
+    program_id = traci.trafficlight.getProgram(tls_id)
+    key = "_tls_phase_plan"
+
+    # reuse cached plan if program unchanged
+    if key in cache:
+        plan: TLSPhasePlan = cache[key]
+        if plan.program_id == program_id:
+            return plan
+
+    program_id, logic = _get_active_program_logic(tls_id)
+    try:
+        phases_obj = logic.getPhases()
+    except Exception:
+        phases_obj = getattr(logic, "phases")
+
+    phases: List[Tuple[int, float, str]] = []
+    phase_duration: Dict[int, float] = {}
+    for i, ph in enumerate(phases_obj):
+        dur = float(getattr(ph, "duration"))
+        st = str(getattr(ph, "state"))
+        phases.append((int(i), dur, st))
+        phase_duration[int(i)] = dur
+
+    if is_major_green is None:
+
+        def is_major_green_local(s: str, d: float) -> bool:
+            return _default_is_major_green(
+                s, d, min_major_green_s=float(min_major_green_s)
+            )
+
+        is_major_green = is_major_green_local
+
+    major_greens = [idx for (idx, dur, st) in phases if is_major_green(st, dur)]
+    if not major_greens:
+        raise RuntimeError(
+            f"[{tls_id}] No major green phases found. "
+            f"Adjust min_major_green_s or provide is_major_green()."
+        )
+
+    n = len(phases)
+    major_set = set(major_greens)
+
+    # owner_major: each phase belongs to the most recent major green in cyclic order
+    owner_major: List[int] = [-1] * n
+    last_major = major_greens[-1]  # for phases before first major in list
+    for i in range(n):
+        if i in major_set:
+            last_major = i
+        owner_major[i] = int(last_major)
+
+    # aux_after_major: phases strictly between major k and next major (cyclic)
+    aux_after_major: Dict[int, List[int]] = {mg: [] for mg in major_greens}
+    for j, mg in enumerate(major_greens):
+        nxt = major_greens[(j + 1) % len(major_greens)]
+        aux: List[int] = []
+        k = (mg + 1) % n
+        while k != nxt:
+            aux.append(int(k))
+            k = (k + 1) % n
+        aux_after_major[int(mg)] = aux
+
+    plan = TLSPhasePlan(
+        program_id=str(program_id),
+        phases=phases,
+        major_greens=[int(x) for x in major_greens],
+        owner_major=owner_major,
+        aux_after_major=aux_after_major,
+        phase_duration=phase_duration,
+    )
+    cache[key] = plan
+    return plan
+
+
+def tls_major_action_dim(
+    tls_id: str, cache: Dict[str, Any], *, min_major_green_s: float = 5.0
+) -> int:
+    plan = get_tls_phase_plan(tls_id, cache, min_major_green_s=min_major_green_s)
+    return int(len(plan.major_greens))
+
+
+def tls_action_to_major_phase(
+    tls_id: str, cache: Dict[str, Any], action: int, *, min_major_green_s: float = 5.0
+) -> int:
+    plan = get_tls_phase_plan(tls_id, cache, min_major_green_s=min_major_green_s)
+    a = int(action)
+    if a < 0 or a >= len(plan.major_greens):
+        raise ValueError(
+            f"action out of range: {a} (num_major={len(plan.major_greens)})"
+        )
+    return int(plan.major_greens[a])
+
+
+def tls_current_major_phase(
+    tls_id: str,
+    cache: Dict[str, Any],
+    current_phase: Optional[int] = None,
+    *,
+    min_major_green_s: float = 5.0,
+) -> int:
+    plan = get_tls_phase_plan(tls_id, cache, min_major_green_s=min_major_green_s)
+    cur = int(
+        traci.trafficlight.getPhase(tls_id) if current_phase is None else current_phase
+    )
+    if cur < 0 or cur >= len(plan.owner_major):
+        # fall back to the first major green
+        return int(plan.major_greens[0])
+    return int(plan.owner_major[cur])
+
+
+def tls_build_switch_segments(
+    tls_id: str,
+    cache: Dict[str, Any],
+    *,
+    target_major_phase: int,
+    hold_s: float,
+    current_phase: Optional[int] = None,
+    min_major_green_s: float = 5.0,
+    min_aux_dur_s: float = 0.1,
+) -> List[Tuple[int, float]]:
+    """
+    Build segments for one macro-action:
+      - if switching away from current major: play all auxiliary phases owned by current major (configured durations)
+      - then play target major green for hold_s (hold_s excludes aux time)
+    Returns list[(phase_idx, duration_s)].
+    """
+    plan = get_tls_phase_plan(tls_id, cache, min_major_green_s=min_major_green_s)
+    cur_major = tls_current_major_phase(
+        tls_id, cache, current_phase=current_phase, min_major_green_s=min_major_green_s
+    )
+    tgt = int(target_major_phase)
+
+    segs: List[Tuple[int, float]] = []
+    if tgt != int(cur_major):
+        for aux_idx in plan.aux_after_major.get(int(cur_major), []):
+            dur = float(plan.phase_duration.get(int(aux_idx), 0.0))
+            if dur < float(min_aux_dur_s):
+                dur = float(min_aux_dur_s)
+            segs.append((int(aux_idx), dur))
+
+    segs.append((tgt, float(hold_s)))
+    return segs
+
+
+def tls_set_phase_frozen(tls_id: str, phase_idx: int) -> None:
+    """Set a TLS phase and prevent SUMO from auto-advancing."""
+    traci.trafficlight.setPhase(tls_id, int(phase_idx))
+    traci.trafficlight.setPhaseDuration(tls_id, 1e6)
+
+
+def tls_advance_pending_segments(
+    *,
+    tls_id: str,
+    pending_segments: Deque[Tuple[int, float]],
+    segment_end_time: float,
+    sim_t: float,
+) -> float:
+    """
+    If the currently-playing segment has ended (sim_t >= segment_end_time),
+    pop the next (phase, dur) from pending_segments, set it frozen, and return
+    the new segment_end_time. If nothing remains, return 0.0.
+    """
+    if segment_end_time <= 0.0:
+        return 0.0
+    if sim_t < float(segment_end_time):
+        return float(segment_end_time)
+
+    if not pending_segments:
+        return 0.0
+
+    next_phase, next_dur = pending_segments.popleft()
+    tls_set_phase_frozen(tls_id, int(next_phase))
+    return float(sim_t) + float(next_dur)
 
 
 """
 helper functions
 """
 
-def start_sumo(sumocfg: str, *, gui: bool, delay_ms: int, sumo_seed: int, traffic_scale: float) -> None:
+
+def start_sumo(
+    sumocfg: str, *, gui: bool, delay_ms: int, sumo_seed: int, traffic_scale: float
+) -> None:
     binary = checkBinary("sumo-gui" if gui else "sumo")
     cmd: List[str] = [
         binary,
-        "-c", sumocfg,
+        "-c",
+        sumocfg,
         "--start",
-        "--no-step-log", "true",
-        "--delay", str(delay_ms),
-        "--seed", str(int(sumo_seed)),
-        "--scale", str(float(traffic_scale)),
+        "--no-step-log",
+        "true",
+        "--delay",
+        str(delay_ms),
+        "--seed",
+        str(int(sumo_seed)),
+        "--scale",
+        str(float(traffic_scale)),
     ]
     traci.start(cmd)
+
 
 def get_phase_count(tls_id: str) -> int:
     current_program = traci.trafficlight.getProgram(tls_id)
@@ -138,7 +399,7 @@ def reward_avg_queue_from_encoded_state(
         val = sum(queues)
     else:
         raise ValueError("reduce must be 'mean' or 'sum'")
-    r = - (0.5 * val + 0.5 * max(queues))
+    r = -(0.5 * val + 0.5 * max(queues))
     return r
 
 
@@ -212,7 +473,7 @@ def reward_top2_queue_from_encoded_state(
     q1 = q_sorted[0]
     q2 = q_sorted[1] if len(q_sorted) >= 2 else q_sorted[0]
 
-    penalty = w1 * (q1 ** power) + w2 * (q2 ** power)
+    penalty = w1 * (q1**power) + w2 * (q2**power)
     return -penalty
 
 
@@ -269,6 +530,7 @@ def throughput_tracker_step(
     # write back updated counter
     cache["_tp_count_since_last"] = count_since_last
 
+
 def reward_throughput_per_second_on_decision(
     sim_time: float,
     cache: Dict,
@@ -307,7 +569,6 @@ def reward_throughput_per_second_on_decision(
     cache["_tp_count_since_last"] = 0
 
     return count / dt
-
 
 
 def reward_throughput_plus_top2_queue(
@@ -354,6 +615,7 @@ def reward_throughput_plus_top2_queue(
       - throughput_ref_veh_per_s: a reasonable "good" throughput (empirical 90-95% percentile under fixed-time works well)
       - queue_ref_veh: lane storage cap in vehicles (or a conservative threshold where you consider it 'too long')
     """
+
     def _clip(x: float, lo: float, hi: float) -> float:
         return lo if x < lo else hi if x > hi else x
 
@@ -374,11 +636,13 @@ def reward_throughput_plus_top2_queue(
         queue_offset_in_block=queue_offset_in_block,
         weights=top2_weights,
         power=queue_power,
-        scale=queue_ref_veh,          # <-- key: normalize queue magnitudes
+        scale=queue_ref_veh,  # <-- key: normalize queue magnitudes
         clip_nonnegative=True,
     )
     # q_reward is <= 0
-    print(f">> reward: thr={thr:.3f} (norm {thr_norm:.3f}), top2_queue_reward={q_reward:.5f}")
+    print(
+        f">> reward: thr={thr:.3f} (norm {thr_norm:.3f}), top2_queue_reward={q_reward:.5f}"
+    )
     r = float(w_throughput) * thr_norm + float(w_queue) * float(q_reward)
 
     if reward_clip is not None:
