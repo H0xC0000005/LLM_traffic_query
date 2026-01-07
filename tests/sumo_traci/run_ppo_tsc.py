@@ -30,12 +30,78 @@ from utility import *
 from scene_encoder import encode_tsc_state_vector_bounded
 
 
-# --------------------------------------------------------------------------------------
-# [DELETED BLOCK compared to DQN pipeline]
-# - ReplayBuffer class
-# - epsilon schedule + epsilon-greedy action selection
-# - target network update logic
-# --------------------------------------------------------------------------------------
+# --- [NEW] PPO rollout diagnostics logging -----------------------------------
+def _to_np(x):
+    if x is None:
+        return None
+    if isinstance(x, np.ndarray):
+        return x
+    if torch.is_tensor(x):
+        return x.detach().cpu().numpy()
+    try:
+        return np.asarray(x)
+    except Exception:
+        return None
+
+
+def _get_attr_any(obj, names):
+    for n in names:
+        if hasattr(obj, n):
+            return _to_np(getattr(obj, n))
+    return None
+
+
+def _explained_variance(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    # EV = 1 - Var[y - yhat] / Var[y]
+    y_true = np.asarray(y_true, dtype=np.float32).reshape(-1)
+    y_pred = np.asarray(y_pred, dtype=np.float32).reshape(-1)
+    var_y = float(np.var(y_true))
+    if var_y < 1e-12:
+        return float("nan")
+    return 1.0 - float(np.var(y_true - y_pred)) / var_y
+
+
+def tb_log_rollout_diagnostics(
+    writer: SummaryWriter, tls_id: str, step: int, buf
+) -> None:
+    """
+    Logs rollout-level diagnostics to TensorBoard.
+    Assumes buf.compute_gae() has been called so buf has returns/advantages populated.
+    Works with common attribute names; adjust the name lists if your RolloutBuffer differs.
+    """
+    rets = _get_attr_any(buf, ["returns", "rets", "return_s"])
+    advs = _get_attr_any(buf, ["advantages", "advs", "adv"])
+    vpred = _get_attr_any(buf, ["values", "vpred", "value_preds", "value_pred"])
+    durs = _get_attr_any(buf, ["durations_s", "duration_s", "durations", "dts"])
+
+    if rets is not None:
+        rets = rets.astype(np.float32).reshape(-1)
+        writer.add_scalar(f"{tls_id}/rollout/return_mean", float(np.mean(rets)), step)
+        writer.add_scalar(f"{tls_id}/rollout/return_std", float(np.std(rets)), step)
+
+    if advs is not None:
+        advs = advs.astype(np.float32).reshape(-1)
+        writer.add_scalar(f"{tls_id}/rollout/adv_mean", float(np.mean(advs)), step)
+        writer.add_scalar(f"{tls_id}/rollout/adv_std", float(np.std(advs)), step)
+
+    if vpred is not None:
+        vpred = vpred.astype(np.float32).reshape(-1)
+        writer.add_scalar(f"{tls_id}/rollout/vpred_mean", float(np.mean(vpred)), step)
+        writer.add_scalar(f"{tls_id}/rollout/vpred_std", float(np.std(vpred)), step)
+
+    if (rets is not None) and (vpred is not None) and (rets.shape[0] == vpred.shape[0]):
+        ev = _explained_variance(rets, vpred)
+        writer.add_scalar(f"{tls_id}/rollout/explained_variance", float(ev), step)
+
+    if durs is not None:
+        durs = durs.astype(np.float32).reshape(-1)
+        writer.add_scalar(f"{tls_id}/rollout/duration_mean", float(np.mean(durs)), step)
+        writer.add_scalar(f"{tls_id}/rollout/duration_std", float(np.std(durs)), step)
+        writer.add_scalar(f"{tls_id}/rollout/duration_min", float(np.min(durs)), step)
+        writer.add_scalar(f"{tls_id}/rollout/duration_max", float(np.max(durs)), step)
+
+
+# ---------------------------------------------------------------------------
 
 
 def start_sumo(
@@ -114,7 +180,11 @@ def run_ppo_tsc(
     action_hold_s: float,
     device: Optional[str],
     hidden_dim: int,
-    lr: float,
+    n_layer: int,
+    use_skip: bool,
+    # lr: float,
+    actor_lr: float,
+    critic_lr: float,
     gamma: float,
     traffic_scale: float,
     tb_logdir: str,
@@ -198,8 +268,12 @@ def run_ppo_tsc(
                         state_dim=state_dim,
                         action_dim=action_dim,
                         seed=seed,
-                        hidden_dim=128,
-                        lr=lr,
+                        hidden_dim=hidden_dim,
+                        n_layer=n_layer,
+                        use_skip=use_skip,
+                        # lr=lr,
+                        actor_lr=actor_lr,
+                        critic_lr=critic_lr,
                         device=device,
                         clip_eps=clip_eps,
                         epochs=ppo_epochs,
@@ -292,6 +366,11 @@ def run_ppo_tsc(
                                     gae_lambda=gae_lambda,
                                     base_dt_s=float(action_hold_s),
                                 )
+
+                                step = tb_step_decision[tls_id]
+                                tb_log_rollout_diagnostics(
+                                    writer, tls_id, step, buf
+                                )  # [NEW]
                                 stats = agents[tls_id].update(buf)
                                 buf.clear()
 
@@ -446,6 +525,11 @@ def run_ppo_tsc(
                                     action_hold_s
                                 ),  # [NEW] interpret gamma as “per hold_s”
                             )
+
+                            step = tb_step_decision[tls_id]
+                            tb_log_rollout_diagnostics(
+                                writer, tls_id, step, buf
+                            )  # [NEW]
                             stats = agents[tls_id].update(buf)
                             buf.clear()
 
@@ -528,7 +612,9 @@ def run_ppo_tsc(
             "action_dim": int(agent.action_dim),
             "hidden_dim": int(agent.hidden_dim),
             "gamma": float(gamma),
-            "lr": float(lr),
+            # "lr": float(lr),
+            "actor_lr": float(actor_lr),
+            "critic_lr": float(critic_lr),
             "encoder": getattr(encoder_fn, "__name__", "<unknown>"),
             "saved_unix_time": float(time.time()),
         }
@@ -559,7 +645,11 @@ def main() -> None:
 
     ap.add_argument("--device", type=str, default=None)
     ap.add_argument("--hidden-dim", type=int, default=128)
-    ap.add_argument("--lr", type=float, default=3e-4)
+    ap.add_argument("--n-layer", type=int, default=2)
+    ap.add_argument("--use-skip", action="store_true")
+    # ap.add_argument("--lr", type=float, default=3e-4)
+    ap.add_argument("--actor-lr", type=float, default=3e-4)
+    ap.add_argument("--critic-lr", type=float, default=1e-3)
     ap.add_argument("--gamma", type=float, default=0.99)
 
     # PPO optional knobs (defaults)
@@ -601,7 +691,11 @@ def main() -> None:
         action_hold_s=float(args.hold),
         device=args.device,
         hidden_dim=int(args.hidden_dim),
-        lr=float(args.lr),
+        n_layer=int(args.n_layer),
+        use_skip=bool(args.use_skip),
+        # lr=float(args.lr),
+        actor_lr=float(args.actor_lr),
+        critic_lr=float(args.critic_lr),
         gamma=float(args.gamma),
         traffic_scale=float(args.traffic_scale),
         tb_logdir=args.tb_logdir,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Dict, Iterator, List, Optional, Tuple
 
 import numpy as np
@@ -108,7 +109,8 @@ class _MLPBlock(nn.Module):
             z = torch.nn.functional.silu(z)
 
             # Residual when possible (same shape)
-            if self.use_skip and z.shape == h.shape:
+            # no shape check; dont let the inconsistency pass silently
+            if self.use_skip and h.shape == z.shape:
                 h = h + z
             else:
                 h = z
@@ -130,8 +132,8 @@ class ActorCriticV2(nn.Module):
         self,
         state_dim: int,
         action_dim: int,
-        *,
         hidden_dim: int = 256,
+        *,
         num_layers: int = 2,
         use_skip: bool = False,
         ln_eps: float = 1e-5,
@@ -286,7 +288,11 @@ class PPOAgent:
     action_dim: int
     seed: int = 0
     hidden_dim: int = 128
-    lr: float = 3e-4
+    n_layer: int = 2
+    use_skip: bool = False
+    # lr: float = 3e-4
+    actor_lr: float = 3e-4
+    critic_lr: float = 1e-3
     device: Optional[str] = None
 
     # PPO hyperparameters (defaults)
@@ -305,10 +311,23 @@ class PPOAgent:
         self.device_t = torch.device(self.device)
 
         torch.manual_seed(int(self.seed))
-        self.model = ActorCritic(
-            self.state_dim, self.action_dim, hidden_dim=self.hidden_dim
+        self.model = ActorCriticV2(
+            self.state_dim,
+            self.action_dim,
+            hidden_dim=self.hidden_dim,
+            num_layers=self.n_layer,
+            use_skip=self.use_skip,
         ).to(self.device_t)
-        self.opt = optim.Adam(self.model.parameters(), lr=float(self.lr))
+        # self.opt = optim.Adam(self.model.parameters(), lr=float(self.lr))
+        self.opt = optim.Adam(
+            [
+                {"params": self.model.actor.parameters(), "lr": self.actor_lr},
+                {"params": self.model.pi.parameters(), "lr": self.actor_lr},
+                {"params": self.model.critic.parameters(), "lr": self.critic_lr},
+                {"params": self.model.v.parameters(), "lr": self.critic_lr},
+            ],
+        )
+        pass
 
     @torch.no_grad()
     def act(self, state_vec: np.ndarray) -> tuple[int, float, float]:
