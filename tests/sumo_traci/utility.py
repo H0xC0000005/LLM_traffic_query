@@ -296,6 +296,46 @@ helper functions
 """
 
 
+# =======================
+# [NEW] shared queue extractor
+# =======================
+def _extract_queues_from_encoded_state(
+    state_vec: Sequence[float],
+    *,
+    num_lanes: int,
+    lane_block_size: int,
+    queue_offset_in_block: int,
+    scale: float = 1.0,
+    clip_nonnegative: bool = True,
+) -> List[float]:
+    """
+    Extract per-lane queue lengths from the encoded state vector.
+
+    Returns a list of length num_lanes.
+    If scale > 0, each queue is divided by scale (useful for normalization).
+    """
+    if num_lanes <= 0:
+        raise ValueError("num_lanes must be > 0")
+
+    expected_min_len = num_lanes * lane_block_size
+    if len(state_vec) < expected_min_len:
+        raise ValueError(
+            f"state_vec too short: len={len(state_vec)} < {expected_min_len} "
+            f"(num_lanes={num_lanes}, lane_block_size={lane_block_size})"
+        )
+
+    s = float(scale) if float(scale) > 0.0 else 1.0
+
+    queues: List[float] = []
+    for i in range(num_lanes):
+        idx = i * lane_block_size + queue_offset_in_block
+        q = float(state_vec[idx])
+        if clip_nonnegative and q < 0.0:
+            q = 0.0
+        queues.append(q / s)
+    return queues
+
+
 def start_sumo(
     sumocfg: str, *, gui: bool, delay_ms: int, sumo_seed: int, traffic_scale: float
 ) -> None:
@@ -440,40 +480,80 @@ def reward_top2_queue_from_encoded_state(
       - If num_lanes == 1, q2 is taken equal to q1.
       - If scale <= 0, scale is treated as 1.0.
     """
-    if num_lanes <= 0:
-        raise ValueError("num_lanes must be > 0")
-
-    expected_min_len = num_lanes * lane_block_size
-    if len(state_vec) < expected_min_len:
-        raise ValueError(
-            f"state_vec too short: len={len(state_vec)} < {expected_min_len} "
-            f"(num_lanes={num_lanes}, lane_block_size={lane_block_size})"
-        )
-
     w1, w2 = float(weights[0]), float(weights[1])
     if w1 < 0.0 or w2 < 0.0:
         raise ValueError("weights must be nonnegative")
     if power < 1.0:
         raise ValueError("power must be >= 1.0")
 
-    s = float(scale) if float(scale) > 0.0 else 1.0
-
-    # Extract queue per lane
-    queues = []
-    base = 0
-    for i in range(num_lanes):
-        idx = base + i * lane_block_size + queue_offset_in_block
-        q = float(state_vec[idx])
-        if clip_nonnegative and q < 0.0:
-            q = 0.0
-        queues.append(q / s)
-
+    queues = _extract_queues_from_encoded_state(
+        state_vec,
+        num_lanes=num_lanes,
+        lane_block_size=lane_block_size,
+        queue_offset_in_block=queue_offset_in_block,
+        scale=scale,
+        clip_nonnegative=clip_nonnegative,
+    )
     # Top-2 largest
     q_sorted = sorted(queues, reverse=True)
     q1 = q_sorted[0]
     q2 = q_sorted[1] if len(q_sorted) >= 2 else q_sorted[0]
 
     penalty = w1 * (q1**power) + w2 * (q2**power)
+    return -penalty
+
+
+# =======================
+# [NEW] softmax-weighted queue penalty (smooth "top" approximation)
+# =======================
+def reward_softmax_queue_from_encoded_state(
+    state_vec: Sequence[float],
+    *,
+    num_lanes: int,
+    lane_block_size: int = 4,
+    queue_offset_in_block: int = 0,
+    power: float = 1.0,
+    scale: float = 1.0,
+    softmax_beta: float = 5.0,
+    clip_nonnegative: bool = True,
+) -> float:
+    """
+    Smooth alternative to "top-k" queue penalty: softmax-weighted penalty over ALL lanes.
+
+      weights_i = softmax(beta * q_i)
+      penalty   = sum_i weights_i * (q_i ** power)
+      reward    = -penalty
+
+    - weights sum to 1 (normalization)
+    - as beta -> +inf, weights concentrate on the maximum queue (approaches max-like behavior)
+    - power > 1 penalizes long queues super-linearly
+
+    All queues are first normalized by `scale` (same as in reward_top2_queue_from_encoded_state).
+    """
+    if power < 1.0:
+        raise ValueError("power must be >= 1.0")
+
+    qs = _extract_queues_from_encoded_state(
+        state_vec,
+        num_lanes=num_lanes,
+        lane_block_size=lane_block_size,
+        queue_offset_in_block=queue_offset_in_block,
+        scale=scale,
+        clip_nonnegative=clip_nonnegative,
+    )
+
+    beta = float(softmax_beta)
+    if beta <= 0.0:
+        # beta<=0: raise error instead of uniform weights
+        raise ValueError("softmax_beta must be > 0.0")
+    else:
+        logits = beta * np.asarray(qs, dtype=np.float64)
+        logits = logits - float(np.max(logits))  # stabilize
+        exps = np.exp(logits)
+        weights = exps / float(np.sum(exps) + 1e-12)
+
+    q_pow = np.asarray(qs, dtype=np.float64) ** float(power)
+    penalty = float(np.sum(weights * q_pow))
     return -penalty
 
 
@@ -578,13 +658,10 @@ def reward_throughput_plus_top2_queue(
     state_vec: Sequence[float],
     cache: Dict,
     num_lanes: int,
-    # --- normalization references (set these so scales match) ---
     throughput_ref_veh_per_s: float,
     queue_ref_veh: float,
-    # --- weighting ---
     w_throughput: float = 1.0,
     w_queue: float = 1.0,
-    # --- top-2 queue shaping ---
     top2_weights: Tuple[float, float] = (0.7, 0.3),
     queue_power: float = 1.0,
     # --- encoding layout ---
@@ -643,6 +720,63 @@ def reward_throughput_plus_top2_queue(
     print(
         f">> reward: thr={thr:.3f} (norm {thr_norm:.3f}), top2_queue_reward={q_reward:.5f}"
     )
+    r = float(w_throughput) * thr_norm + float(w_queue) * float(q_reward)
+
+    if reward_clip is not None:
+        lo, hi = float(reward_clip[0]), float(reward_clip[1])
+        if lo > hi:
+            lo, hi = hi, lo
+        r = _clip(r, lo, hi)
+
+    return float(r)
+
+
+# =======================
+# [NEW] composite reward variant using softmax queue term
+# =======================
+def reward_throughput_plus_softmax_queue(
+    *,
+    tls_id: str,
+    sim_time: float,
+    state_vec: Sequence[float],
+    cache: Dict,
+    num_lanes: int,
+    throughput_ref_veh_per_s: float,
+    queue_ref_veh: float,
+    w_throughput: float = 1.0,
+    w_queue: float = 1.0,
+    queue_power: float = 1.0,
+    softmax_beta: float = 5.0,
+    lane_block_size: int = 4,
+    queue_offset_in_block: int = 0,
+    reward_clip: Optional[Tuple[float, float]] = (-1.0, 1.0),
+) -> float:
+    def _clip(x: float, lo: float, hi: float) -> float:
+        return lo if x < lo else hi if x > hi else x
+
+    if throughput_ref_veh_per_s <= 0.0:
+        raise ValueError("throughput_ref_veh_per_s must be > 0")
+    if queue_ref_veh <= 0.0:
+        raise ValueError("queue_ref_veh must be > 0")
+
+    thr = reward_throughput_per_second_on_decision(sim_time=sim_time, cache=cache)
+    thr_norm = _clip(float(thr) / float(throughput_ref_veh_per_s), 0.0, 1.0)
+
+    q_reward = reward_softmax_queue_from_encoded_state(
+        state_vec,
+        num_lanes=num_lanes,
+        lane_block_size=lane_block_size,
+        queue_offset_in_block=queue_offset_in_block,
+        power=queue_power,
+        scale=queue_ref_veh,
+        softmax_beta=softmax_beta,
+        clip_nonnegative=True,
+    )
+
+    print(
+        f">> reward: thr={thr:.3f} (norm {thr_norm:.3f}), softmax_queue_reward={q_reward:.5f}"
+    )
+
     r = float(w_throughput) * thr_norm + float(w_queue) * float(q_reward)
 
     if reward_clip is not None:

@@ -204,6 +204,7 @@ def run_ppo_tsc(
     ppo_epochs: int,
     minibatch_size: int,
     clip_eps: float,
+    vf_clip_eps: float,
     gae_lambda: float,
     ent_coef: float,
     vf_coef: float,
@@ -276,6 +277,7 @@ def run_ppo_tsc(
                         critic_lr=critic_lr,
                         device=device,
                         clip_eps=clip_eps,
+                        vf_clip_eps=vf_clip_eps,
                         epochs=ppo_epochs,
                         minibatch_size=minibatch_size,
                         gamma=gamma,
@@ -608,14 +610,27 @@ def run_ppo_tsc(
             "tls_id": tls_id,
             "sumocfg": sumocfg,
             "seed": int(seed),
+            "sumo_seed": int(sumo_seed),
+            "action_hold_s": float(action_hold_s),
             "state_dim": int(agent.state_dim),
             "action_dim": int(agent.action_dim),
             "hidden_dim": int(agent.hidden_dim),
+            "layer_count": int(agent.n_layer),
+            "use_skip": bool(agent.use_skip),
             "gamma": float(gamma),
             # "lr": float(lr),
             "actor_lr": float(actor_lr),
             "critic_lr": float(critic_lr),
+            "clip_eps": float(clip_eps),
+            "vf_clip_eps": float(vf_clip_eps),
+            "vf_coef": float(vf_coef),
+            "ent_coef": float(ent_coef),
+            "gae_lambda": float(gae_lambda),
+            "ppo_epochs": int(ppo_epochs),
+            "minibatch_size": int(minibatch_size),
+            "rollout_steps": int(rollout_steps),
             "encoder": getattr(encoder_fn, "__name__", "<unknown>"),
+            "traffic_scale": float(traffic_scale),
             "saved_unix_time": float(time.time()),
         }
 
@@ -657,6 +672,7 @@ def main() -> None:
     ap.add_argument("--ppo-epochs", type=int, default=4)
     ap.add_argument("--minibatch", type=int, default=64)
     ap.add_argument("--clip-eps", type=float, default=0.2)
+    ap.add_argument("--vf-clip-eps", type=float, default=None)
     ap.add_argument("--gae-lambda", type=float, default=0.95)
     ap.add_argument("--ent-coef", type=float, default=0.01)
     ap.add_argument("--vf-coef", type=float, default=0.5)
@@ -713,6 +729,7 @@ def main() -> None:
         ppo_epochs=int(args.ppo_epochs),
         minibatch_size=int(args.minibatch),
         clip_eps=float(args.clip_eps),
+        vf_clip_eps=float(args.vf_clip_eps),
         gae_lambda=float(args.gae_lambda),
         ent_coef=float(args.ent_coef),
         vf_coef=float(args.vf_coef),

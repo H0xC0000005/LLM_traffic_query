@@ -297,6 +297,8 @@ class PPOAgent:
 
     # PPO hyperparameters (defaults)
     clip_eps: float = 0.2
+    # [NEW] value-function clipping; set to None to disable
+    vf_clip_eps: Optional[float] = None
     epochs: int = 4
     minibatch_size: int = 64
     gamma: float = 0.99
@@ -373,6 +375,8 @@ class PPOAgent:
         states = torch.from_numpy(np.stack(buf.states)).to(self.device_t)
         actions = torch.tensor(buf.actions, dtype=torch.long).to(self.device_t)
         old_logps = torch.tensor(buf.logps, dtype=torch.float32).to(self.device_t)
+        # [NEW] old value predictions saved during rollout collection
+        old_values = torch.tensor(buf.values, dtype=torch.float32).to(self.device_t)
         returns = torch.from_numpy(buf.returns).to(self.device_t)
         advs = torch.from_numpy(buf.advs).to(self.device_t)
 
@@ -382,6 +386,7 @@ class PPOAgent:
             "entropy": 0.0,
             "approx_kl": 0.0,
             "clip_frac": 0.0,
+            "vf_clip_frac": 0.0,  # [NEW]
         }
         n_updates = 0
 
@@ -392,6 +397,7 @@ class PPOAgent:
                 mb_states = states[mb_idx]
                 mb_actions = actions[mb_idx]
                 mb_old_logps = old_logps[mb_idx]
+                mb_old_values = old_values[mb_idx]  # [NEW]
                 mb_returns = returns[mb_idx]
                 mb_advs = advs[mb_idx]
 
@@ -401,7 +407,30 @@ class PPOAgent:
                 clipped = torch.clamp(ratio, 1.0 - self.clip_eps, 1.0 + self.clip_eps)
                 pg_loss = -torch.min(ratio * mb_advs, clipped * mb_advs).mean()
 
-                v_loss = 0.5 * (mb_returns - values).pow(2).mean()
+                # --- OLD ---------------------------------------------------------
+                # v_loss = 0.5 * (mb_returns - values).pow(2).mean()
+                # ---------------------------------------------------------------
+
+                # --- [NEW] PPO value clipping ------------------------------------
+                if self.vf_clip_eps is None:
+                    v_loss = 0.5 * (mb_returns - values).pow(2).mean()
+                    vf_clip_frac = torch.tensor(0.0, device=values.device)
+                else:
+                    eps_v = float(self.vf_clip_eps)
+                    v_pred_clipped = mb_old_values + torch.clamp(
+                        values - mb_old_values, -eps_v, eps_v
+                    )
+
+                    v_loss_unclipped = (values - mb_returns).pow(2)
+                    v_loss_clipped = (v_pred_clipped - mb_returns).pow(2)
+
+                    # max matches common PPO implementations (SB3/baselines)
+                    v_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
+
+                    vf_clip_frac = (
+                        (torch.abs(values - mb_old_values) > eps_v).float().mean()
+                    )
+                # ----------------------------------------------------------------
                 ent = entropy.mean()
 
                 loss = pg_loss + self.vf_coef * v_loss - self.ent_coef * ent
@@ -420,6 +449,7 @@ class PPOAgent:
                 stats["entropy"] += float(ent.item())
                 stats["approx_kl"] += float(approx_kl.item())
                 stats["clip_frac"] += float(clip_frac.item())
+                stats["vf_clip_frac"] += float(vf_clip_frac.item())  # [NEW]
                 n_updates += 1
 
         if n_updates > 0:
