@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Dict, Iterator, List, Optional, Tuple
+from typing import Dict, Iterator, List, Literal, Optional, Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.distributions import Categorical
+import torch.nn.functional as F
 
 
 """
@@ -173,6 +174,261 @@ class ActorCriticV2(nn.Module):
         return logits, value
 
 
+class _ScalarEmbed(nn.Module):
+    """Embed a scalar feature (e.g., Δt) into a vector."""
+
+    def __init__(self, out_dim: int, hidden_dim: int = 64) -> None:
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(1, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, out_dim),
+        )
+        # match your trunk style: orthogonal init
+        _ortho_init_linear(self.net[0], gain=math.sqrt(2.0))
+        _ortho_init_linear(self.net[2], gain=1.0)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B,1)
+        return self.net(x)
+
+
+class _OneHotEmbed(nn.Module):
+    """Embed a one-hot previous-action vector into a vector."""
+
+    def __init__(self, in_dim: int, out_dim: int, hidden_dim: int = 64) -> None:
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, out_dim),
+        )
+        _ortho_init_linear(self.net[0], gain=math.sqrt(2.0))
+        _ortho_init_linear(self.net[2], gain=1.0)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B,A)
+        return self.net(x)
+
+
+class _GatedResBlock(nn.Module):
+    """
+    Pre-LN gated residual MLP block:
+      u = LN(h)
+      f = Linear(u->4d)->SiLU->Linear(4d->d)
+      g = sigmoid(Linear(u->d))
+      h = h + g * f
+    """
+
+    def __init__(
+        self,
+        d: int,
+        *,
+        expansion: int = 4,
+        ln_eps: float = 1e-5,
+        gate_bias_init: float = -2.0,  # start near "mostly-skip" for stability
+    ) -> None:
+        super().__init__()
+        self.ln = nn.LayerNorm(d, eps=ln_eps)
+
+        self.fc1 = nn.Linear(d, expansion * d)
+        self.fc2 = nn.Linear(expansion * d, d)
+
+        self.gate = nn.Linear(d, d)
+
+        # trunk init consistent with your code (orthogonal, sqrt(2) gain) :contentReference[oaicite:0]{index=0}
+        _ortho_init_linear(self.fc1, gain=math.sqrt(2.0))
+        # small/zero init for residual update helps PPO stability
+        nn.init.zeros_(self.fc2.weight)
+        nn.init.zeros_(self.fc2.bias)
+
+        # gate: keep it initially in a non-saturated region and mostly "closed"
+        _ortho_init_linear(self.gate, gain=0.1)
+        nn.init.constant_(self.gate.bias, gate_bias_init)
+
+    def forward(self, h: torch.Tensor) -> torch.Tensor:
+        u = self.ln(h)
+        f = self.fc2(F.silu(self.fc1(u)))
+        g = torch.sigmoid(self.gate(u))
+        return h + g * f
+
+
+class _GatedResTrunk(nn.Module):
+    """Input projection + N gated residual blocks + output LN."""
+
+    def __init__(
+        self,
+        in_dim: int,
+        hidden_dim: int,
+        n_blocks: int,
+        *,
+        expansion: int = 4,
+        ln_eps: float = 1e-5,
+        gate_bias_init: float = -2.0,
+    ) -> None:
+        super().__init__()
+        self.in_proj = nn.Linear(in_dim, hidden_dim)
+        _ortho_init_linear(self.in_proj, gain=math.sqrt(2.0))
+
+        self.blocks = nn.ModuleList(
+            [
+                _GatedResBlock(
+                    hidden_dim,
+                    expansion=expansion,
+                    ln_eps=ln_eps,
+                    gate_bias_init=gate_bias_init,
+                )
+                for _ in range(int(n_blocks))
+            ]
+        )
+        self.out_ln = nn.LayerNorm(hidden_dim, eps=ln_eps)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.in_proj(x)
+        for blk in self.blocks:
+            h = blk(h)  # always residual (skip-like)
+        return self.out_ln(h)
+
+
+class ActorCriticV3(nn.Module):
+    """
+    Drop-in replacement for ActorCriticV2:
+      - keeps forward(x)->(logits, value) expected by PPOAgent :contentReference[oaicite:1]{index=1}
+      - exposes .actor, .critic, .pi, .v so your optimizer param groups still work :contentReference[oaicite:2]{index=2}
+      - gated residual MLP trunks (good default capability: hidden_dim=256, n_blocks=4..6)
+
+    Optional conditioning without changing PPO code: pack extra fields into your state vector:
+      state = [stats..., dt, prev_a]                     (prev_a as index)
+      state = [stats..., dt, prev_a_one_hot (len=A)]     (prev_a one-hot)
+    """
+
+    def __init__(
+        self,
+        state_dim: int,
+        action_dim: int,
+        hidden_dim: int = 256,
+        *,
+        n_blocks: int = 6,
+        expansion: int = 4,
+        ln_eps: float = 1e-5,
+        # parsing / conditioning
+        obs_dim: Optional[int] = None,  # number of "stats" features at the front
+        use_dt: bool = False,  # if True, expects 1 scalar after obs
+        prev_action_mode: Literal["none", "index", "one_hot"] = "none",
+        dt_embed_dim: int = 16,
+        prev_act_embed_dim: int = 32,
+        head_hidden: int = 128,
+        pi_head_gain: float = 0.01,
+        v_head_gain: float = 1.0,
+        gate_bias_init: float = -2.0,
+    ) -> None:
+        super().__init__()
+        self.action_dim = int(action_dim)
+        self.use_dt = bool(use_dt)
+        self.prev_action_mode = prev_action_mode
+
+        if obs_dim is None:
+            # default: treat everything as plain stats (no extra conditioning)
+            obs_dim = int(state_dim)
+        self.obs_dim = int(obs_dim)
+
+        # embedders (only created if enabled)
+        self.dt_embed = _ScalarEmbed(dt_embed_dim) if self.use_dt else None
+
+        if self.prev_action_mode == "index":
+            self.prev_act_emb = nn.Embedding(self.action_dim, prev_act_embed_dim)
+            nn.init.normal_(self.prev_act_emb.weight, mean=0.0, std=0.02)
+            self.prev_act_oh_embed = None
+        elif self.prev_action_mode == "one_hot":
+            self.prev_act_emb = None
+            self.prev_act_oh_embed = _OneHotEmbed(self.action_dim, prev_act_embed_dim)
+        else:
+            self.prev_act_emb = None
+            self.prev_act_oh_embed = None
+
+        # effective trunk input dim after embedding
+        trunk_in_dim = self.obs_dim
+        if self.use_dt:
+            trunk_in_dim += int(dt_embed_dim)
+        if self.prev_action_mode != "none":
+            trunk_in_dim += int(prev_act_embed_dim)
+
+        # separate actor/critic trunks like your V2 :contentReference[oaicite:3]{index=3}
+        self.actor = _GatedResTrunk(
+            trunk_in_dim,
+            int(hidden_dim),
+            int(n_blocks),
+            expansion=int(expansion),
+            ln_eps=float(ln_eps),
+            gate_bias_init=float(gate_bias_init),
+        )
+        self.critic = _GatedResTrunk(
+            trunk_in_dim,
+            int(hidden_dim),
+            int(n_blocks),
+            expansion=int(expansion),
+            ln_eps=float(ln_eps),
+            gate_bias_init=float(gate_bias_init),
+        )
+
+        # heads (small MLP per the "capability" answer)
+        self.pi = nn.Sequential(
+            nn.Linear(int(hidden_dim), int(head_hidden)),
+            nn.SiLU(),
+            nn.Linear(int(head_hidden), self.action_dim),
+        )
+        self.v = nn.Sequential(
+            nn.Linear(int(hidden_dim), int(head_hidden)),
+            nn.SiLU(),
+            nn.Linear(int(head_hidden), 1),
+        )
+
+        # init heads: hidden layers sqrt(2), final layers PPO-friendly
+        _ortho_init_linear(self.pi[0], gain=math.sqrt(2.0))
+        _ortho_init_linear(self.pi[2], gain=float(pi_head_gain))
+        _ortho_init_linear(self.v[0], gain=math.sqrt(2.0))
+        _ortho_init_linear(self.v[2], gain=float(v_head_gain))
+
+    def _pack_features(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Parse x into (stats, dt, prev_action) according to flags, then concatenate
+        as [stats, embed(dt), embed(prev_a)] for the gated trunks.
+        """
+        # x is float tensor from PPOAgent :contentReference[oaicite:4]{index=4}
+        stats = x[..., : self.obs_dim]
+        off = self.obs_dim
+
+        feats = [stats]
+
+        if self.use_dt:
+            dt = x[..., off : off + 1]
+            off += 1
+            feats.append(self.dt_embed(dt))
+        if self.prev_action_mode == "index":
+            prev_a = x[..., off : off + 1]
+            # state is float -> map to int index (user must store exact ints)
+            prev_idx = prev_a.round().to(torch.long).squeeze(-1)
+            feats.append(self.prev_act_emb(prev_idx))
+            off += 1
+        elif self.prev_action_mode == "one_hot":
+            prev_oh = x[..., off : off + self.action_dim]
+            feats.append(self.prev_act_oh_embed(prev_oh))
+            off += self.action_dim
+
+        return torch.cat(feats, dim=-1)
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        z = self._pack_features(x)
+        ha = self.actor(z)
+        hc = self.critic(z)
+
+        logits = self.pi(ha)
+        value = self.v(hc).squeeze(
+            -1
+        )  # keep (B,) like V2 :contentReference[oaicite:5]{index=5}
+        return logits, value
+
+
 """
 utilities of PPO agent
 """
@@ -313,12 +569,18 @@ class PPOAgent:
         self.device_t = torch.device(self.device)
 
         torch.manual_seed(int(self.seed))
-        self.model = ActorCriticV2(
+        # self.model = ActorCriticV2(
+        #     self.state_dim,
+        #     self.action_dim,
+        #     hidden_dim=self.hidden_dim,
+        #     num_layers=self.n_layer,
+        #     use_skip=self.use_skip,
+        # ).to(self.device_t)
+        self.model = ActorCriticV3(
             self.state_dim,
             self.action_dim,
             hidden_dim=self.hidden_dim,
-            num_layers=self.n_layer,
-            use_skip=self.use_skip,
+            n_blocks=self.n_layer,
         ).to(self.device_t)
         # self.opt = optim.Adam(self.model.parameters(), lr=float(self.lr))
         self.opt = optim.Adam(

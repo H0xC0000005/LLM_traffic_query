@@ -6,6 +6,8 @@ tensorboard_logs
 dqn_tsc_models
 ppo_tsc_models
 eval_results
+expert_function_cache
+
 
 out.txt
 memo.txt

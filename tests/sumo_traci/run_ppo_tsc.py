@@ -186,7 +186,8 @@ def run_ppo_tsc(
     actor_lr: float,
     critic_lr: float,
     gamma: float,
-    traffic_scale: float,
+    traffic_scale_mean: float,
+    traffic_scale_std: float,
     tb_logdir: str,
     save_dir: str,
     # reward params (reuse your existing utility functions)
@@ -231,12 +232,15 @@ def run_ppo_tsc(
             break
 
         ep_wall_start = time.time()
+        traffic_scale_sampled = random.gauss(
+            mu=float(traffic_scale_mean), sigma=float(traffic_scale_std)
+        )
         start_sumo(
             sumocfg,
             gui=gui,
             delay_ms=delay_ms,
             sumo_seed=sumo_seed + ep,
-            traffic_scale=traffic_scale,
+            traffic_scale=traffic_scale_sampled,  # use sampled scale per episode instead of fixed
         )
         try:
             tls_ids = list(traci.trafficlight.getIDList())
@@ -331,7 +335,7 @@ def run_ppo_tsc(
                             num_lanes = max(
                                 1, len(encoder_cache[tls_id].get("lane_ids", []))
                             )
-                            r = reward_throughput_plus_top2_queue(
+                            r = reward_throughput_plus_softmax_queue(
                                 tls_id=tls_id,
                                 sim_time=sim_t,
                                 state_vec=terminal_state,
@@ -341,7 +345,7 @@ def run_ppo_tsc(
                                 queue_ref_veh=queue_ref_veh,
                                 w_throughput=w_throughput,
                                 w_queue=w_queue,
-                                top2_weights=(top2_w1, top2_w2),
+                                # top2_weights=(top2_w1, top2_w2),
                                 queue_power=queue_power,
                                 reward_clip=(reward_clip_lo, reward_clip_hi),
                             )
@@ -430,7 +434,7 @@ def run_ppo_tsc(
                             and st.logp is not None
                             and st.value is not None
                         ):
-                            r = reward_throughput_plus_top2_queue(
+                            r = reward_throughput_plus_softmax_queue(
                                 tls_id=tls_id,
                                 sim_time=sim_t,
                                 state_vec=cur_state,
@@ -440,7 +444,7 @@ def run_ppo_tsc(
                                 queue_ref_veh=queue_ref_veh,
                                 w_throughput=w_throughput,
                                 w_queue=w_queue,
-                                top2_weights=(top2_w1, top2_w2),
+                                # top2_weights=(top2_w1, top2_w2),
                                 queue_power=queue_power,
                                 reward_clip=(reward_clip_lo, reward_clip_hi),
                             )
@@ -463,7 +467,7 @@ def run_ppo_tsc(
                             writer.add_scalar(f"{tls_id}/train/reward", float(r), step)
                         else:
                             # first controlled action: initialize throughput window (no-op reward)
-                            _ = reward_throughput_plus_top2_queue(
+                            _ = reward_throughput_plus_softmax_queue(
                                 tls_id=tls_id,
                                 sim_time=sim_t,
                                 state_vec=cur_state,
@@ -473,7 +477,7 @@ def run_ppo_tsc(
                                 queue_ref_veh=queue_ref_veh,
                                 w_throughput=0.0,
                                 w_queue=0.0,
-                                top2_weights=(top2_w1, top2_w2),
+                                # top2_weights=(top2_w1, top2_w2),
                                 queue_power=queue_power,
                                 reward_clip=(reward_clip_lo, reward_clip_hi),
                             )
@@ -595,6 +599,7 @@ def run_ppo_tsc(
         ep_elapsed = time.time() - ep_wall_start
         total_elapsed += ep_elapsed
         writer.add_scalar("global/episode_wall_s", float(ep_elapsed), ep)
+        writer.add_scalar("global/traffic_scale", float(traffic_scale_sampled), ep)
 
     writer.flush()
     writer.close()
@@ -630,7 +635,8 @@ def run_ppo_tsc(
             "minibatch_size": int(minibatch_size),
             "rollout_steps": int(rollout_steps),
             "encoder": getattr(encoder_fn, "__name__", "<unknown>"),
-            "traffic_scale": float(traffic_scale),
+            "traffic_scale_mean": float(traffic_scale_mean),
+            "traffic_scale_std": float(traffic_scale_std),
             "saved_unix_time": float(time.time()),
         }
 
@@ -656,7 +662,8 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=123)
     ap.add_argument("--sumo-seed", type=int, default=0)
     ap.add_argument("--delay-ms", type=int, default=1)
-    ap.add_argument("--traffic-scale", type=float, default=1.0)
+    ap.add_argument("--traffic-scale-mean", type=float, default=1.0)
+    ap.add_argument("--traffic-scale-std", type=float, default=0.0)
 
     ap.add_argument("--device", type=str, default=None)
     ap.add_argument("--hidden-dim", type=int, default=128)
@@ -713,7 +720,8 @@ def main() -> None:
         actor_lr=float(args.actor_lr),
         critic_lr=float(args.critic_lr),
         gamma=float(args.gamma),
-        traffic_scale=float(args.traffic_scale),
+        traffic_scale_mean=float(args.traffic_scale_mean),
+        traffic_scale_std=float(args.traffic_scale_std),
         tb_logdir=args.tb_logdir,
         save_dir=args.save_dir,
         throughput_ref_veh_per_s=float(args.thr_ref),
