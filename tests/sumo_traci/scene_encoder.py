@@ -1,5 +1,5 @@
 import numpy as np
-import traci
+import libsumo as traci
 
 
 def encode_tsc_state_vector(

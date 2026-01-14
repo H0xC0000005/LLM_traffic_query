@@ -7,7 +7,7 @@ from collections import deque
 from typing import Any, Callable, Deque, Dict, List, Optional, Sequence, Set, Tuple
 from dataclasses import dataclass
 from sumolib import checkBinary
-import traci
+import libsumo as traci
 
 
 """

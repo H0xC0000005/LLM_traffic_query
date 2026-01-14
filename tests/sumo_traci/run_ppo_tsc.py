@@ -20,7 +20,8 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 import numpy as np
-import traci
+
+import libsumo as traci
 from sumolib import checkBinary
 from torch.utils.tensorboard import SummaryWriter
 import torch  # imported after numpy (Windows OpenMP duplicate init mitigation)
@@ -28,6 +29,37 @@ import torch  # imported after numpy (Windows OpenMP duplicate init mitigation)
 from ppo_agent import PPOAgent, RolloutBuffer
 from utility import *
 from scene_encoder import encode_tsc_state_vector_bounded
+from expert_feature_extractor import *
+
+
+# run-specfic encoding function, combining expert features and original scene encoder
+def encode_tsc_state_vector_combined(
+    tls_id: str, *, cache: Optional[dict] = None, **kwargs
+) -> np.ndarray:
+    """
+    Returns concatenated features:
+      [ encode_tsc_state_vector_bounded(...) , tsc_isolated_intersection_feature_vector(...) ]
+
+    Uses namespaced caches to avoid key collisions:
+      cache["_enc_core"] : for scenario encoder
+      cache["_enc_sem"]  : for semantic extractor (EMA, trackers, etc.)
+    """
+    if cache is None:
+        cache = {}
+
+    core_cache = cache.setdefault("_enc_core", {})
+    sem_cache = cache.setdefault("_enc_sem", {})
+
+    v_core = encode_tsc_state_vector_bounded(tls_id, cache=core_cache, **kwargs)
+    v_sem = tsc_isolated_intersection_feature_vector(tls_id, cache=sem_cache)
+
+    return np.concatenate(
+        [
+            np.asarray(v_core, dtype=np.float32),
+            np.asarray(v_sem, dtype=np.float32),
+        ],
+        axis=0,
+    )
 
 
 # --- [NEW] PPO rollout diagnostics logging -----------------------------------
@@ -214,7 +246,8 @@ def run_ppo_tsc(
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    encoder_fn = encode_tsc_state_vector_bounded
+    # encoder_fn = encode_tsc_state_vector_bounded
+    encoder_fn = encode_tsc_state_vector_combined
 
     run_name = f"sumo_ppo_seed{seed}_{int(time.time())}"
     writer = SummaryWriter(log_dir=os.path.join(tb_logdir, run_name))
@@ -332,8 +365,18 @@ def run_ppo_tsc(
                                 cache=encoder_cache[tls_id],
                             ).astype(np.float32)
 
+                            # OLD: only work with single scenario encoder
+                            # num_lanes = max(
+                            #     1, len(encoder_cache[tls_id].get("lane_ids", []))
+                            # )
+                            # NEW: combined encoder uses namespaced cache
                             num_lanes = max(
-                                1, len(encoder_cache[tls_id].get("lane_ids", []))
+                                1,
+                                len(
+                                    encoder_cache[tls_id]
+                                    .get("_enc_core", {})
+                                    .get("lane_ids", [])
+                                ),
                             )
                             r = reward_throughput_plus_softmax_queue(
                                 tls_id=tls_id,
@@ -422,8 +465,18 @@ def run_ppo_tsc(
                             cache=encoder_cache[tls_id],
                         ).astype(np.float32)
 
+                        # OLD: only work with single scenario encoder
+                        # num_lanes = max(
+                        #     1, len(encoder_cache[tls_id].get("lane_ids", []))
+                        # )
+                        # NEW: combined encoder uses namespaced cache
                         num_lanes = max(
-                            1, len(encoder_cache[tls_id].get("lane_ids", []))
+                            1,
+                            len(
+                                encoder_cache[tls_id]
+                                .get("_enc_core", {})
+                                .get("lane_ids", [])
+                            ),
                         )
 
                         # [NEW BLOCK] close previous interval and push to PPO rollout buffer
