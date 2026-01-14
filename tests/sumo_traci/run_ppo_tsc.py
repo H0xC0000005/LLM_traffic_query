@@ -246,8 +246,8 @@ def run_ppo_tsc(
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    # encoder_fn = encode_tsc_state_vector_bounded
-    encoder_fn = encode_tsc_state_vector_combined
+    encoder_fn = encode_tsc_state_vector_bounded
+    # encoder_fn = encode_tsc_state_vector_combined
 
     run_name = f"sumo_ppo_seed{seed}_{int(time.time())}"
     writer = SummaryWriter(log_dir=os.path.join(tb_logdir, run_name))
@@ -366,18 +366,18 @@ def run_ppo_tsc(
                             ).astype(np.float32)
 
                             # OLD: only work with single scenario encoder
-                            # num_lanes = max(
-                            #     1, len(encoder_cache[tls_id].get("lane_ids", []))
-                            # )
-                            # NEW: combined encoder uses namespaced cache
                             num_lanes = max(
-                                1,
-                                len(
-                                    encoder_cache[tls_id]
-                                    .get("_enc_core", {})
-                                    .get("lane_ids", [])
-                                ),
+                                1, len(encoder_cache[tls_id].get("lane_ids", []))
                             )
+                            # NEW: combined encoder uses namespaced cache
+                            # num_lanes = max(
+                            #     1,
+                            #     len(
+                            #         encoder_cache[tls_id]
+                            #         .get("_enc_core", {})
+                            #         .get("lane_ids", [])
+                            #     ),
+                            # )
                             r = reward_throughput_plus_softmax_queue(
                                 tls_id=tls_id,
                                 sim_time=sim_t,
@@ -466,18 +466,18 @@ def run_ppo_tsc(
                         ).astype(np.float32)
 
                         # OLD: only work with single scenario encoder
-                        # num_lanes = max(
-                        #     1, len(encoder_cache[tls_id].get("lane_ids", []))
-                        # )
-                        # NEW: combined encoder uses namespaced cache
                         num_lanes = max(
-                            1,
-                            len(
-                                encoder_cache[tls_id]
-                                .get("_enc_core", {})
-                                .get("lane_ids", [])
-                            ),
+                            1, len(encoder_cache[tls_id].get("lane_ids", []))
                         )
+                        # NEW: combined encoder uses namespaced cache
+                        # num_lanes = max(
+                        #     1,
+                        #     len(
+                        #         encoder_cache[tls_id]
+                        #         .get("_enc_core", {})
+                        #         .get("lane_ids", [])
+                        #     ),
+                        # )
 
                         # [NEW BLOCK] close previous interval and push to PPO rollout buffer
                         if (
