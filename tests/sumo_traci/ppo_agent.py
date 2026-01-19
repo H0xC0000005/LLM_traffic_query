@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Dict, Iterator, List, Literal, Optional, Tuple
+from typing import Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -619,6 +619,43 @@ class PPOAgent:
         )
         logits, _ = self.model(x)
         return int(torch.argmax(logits, dim=1).item())
+
+    @torch.no_grad()
+    def forward_logits_value(
+        self,
+        state: Union[np.ndarray, torch.Tensor],
+        *,
+        return_probs: bool = False,
+        to_cpu: bool = False,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
+        """
+        Forward pass for evaluation / analysis.
+
+        Returns:
+        logits: (B, action_dim)
+        probs:  (B, action_dim) if return_probs=True else None
+        value:  (B,)
+        """
+        if isinstance(state, np.ndarray):
+            x = torch.from_numpy(state.astype(np.float32, copy=False))
+        else:
+            x = state
+
+        if x.dim() == 1:
+            x = x.unsqueeze(0)  # (1, state_dim)
+
+        x = x.to(self.device_t, dtype=torch.float32)
+
+        logits, value = self.model(x)  # logits: (B,A), value: (B,)
+        probs = torch.softmax(logits, dim=-1) if return_probs else None
+
+        if to_cpu:
+            logits = logits.detach().cpu()
+            value = value.detach().cpu()
+            if probs is not None:
+                probs = probs.detach().cpu()
+
+        return logits, probs, value
 
     def _evaluate(
         self, states: torch.Tensor, actions: torch.Tensor
