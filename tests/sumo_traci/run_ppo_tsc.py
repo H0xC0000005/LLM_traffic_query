@@ -28,7 +28,10 @@ import torch  # imported after numpy (Windows OpenMP duplicate init mitigation)
 
 from ppo_agent import PPOAgent, RolloutBuffer
 from utility import *
-from scene_encoder import encode_tsc_state_vector_bounded
+from scene_encoder import (
+    encode_tsc_state_vector_bounded,
+    encode_tsc_state_vector_bounded_v2,
+)
 from expert_feature_extractor import *
 
 
@@ -50,7 +53,7 @@ def encode_tsc_state_vector_combined(
     core_cache = cache.setdefault("_enc_core", {})
     sem_cache = cache.setdefault("_enc_sem", {})
 
-    v_core = encode_tsc_state_vector_bounded(tls_id, cache=core_cache, **kwargs)
+    v_core = encode_tsc_state_vector_bounded_v2(tls_id, cache=core_cache, **kwargs)
     v_sem = tsc_isolated_intersection_feature_vector(tls_id, cache=sem_cache)
 
     return np.concatenate(
@@ -241,13 +244,23 @@ def run_ppo_tsc(
     gae_lambda: float,
     ent_coef: float,
     vf_coef: float,
+    # control flags
+    use_expert_features: bool = False,
 ) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    encoder_fn = encode_tsc_state_vector_bounded
+    # encoder_fn = encode_tsc_state_vector_bounded_v2
     # encoder_fn = encode_tsc_state_vector_combined
+    if use_expert_features:
+        encoder_fn = encode_tsc_state_vector_combined
+        print("[run_ppo_tsc] Using combined encoder with expert features.")
+        time.sleep(3)  # allow user to see the print
+    else:
+        encoder_fn = encode_tsc_state_vector_bounded_v2
+        print("[run_ppo_tsc] Using core scenario encoder only.")
+        time.sleep(3)  # allow user to see the print
 
     run_name = f"sumo_ppo_seed{seed}_{int(time.time())}"
     writer = SummaryWriter(log_dir=os.path.join(tb_logdir, run_name))
@@ -263,6 +276,11 @@ def run_ppo_tsc(
     for ep in range(int(episodes)):
         if total_elapsed >= float(max_time):
             break
+
+        # single reset authority (per-episode)
+        # Clears: core encoder cache, expert/EMA cache (if combined), throughput tracker state, etc.
+        encoder_cache.clear()
+        pending.clear()
 
         ep_wall_start = time.time()
         traffic_scale_sampled = random.gauss(
@@ -366,9 +384,9 @@ def run_ppo_tsc(
                             ).astype(np.float32)
 
                             # OLD: only work with single scenario encoder
-                            num_lanes = max(
-                                1, len(encoder_cache[tls_id].get("lane_ids", []))
-                            )
+                            # num_lanes = max(
+                            #     1, len(encoder_cache[tls_id].get("lane_ids", []))
+                            # )
                             # NEW: combined encoder uses namespaced cache
                             # num_lanes = max(
                             #     1,
@@ -378,6 +396,15 @@ def run_ppo_tsc(
                             #         .get("lane_ids", [])
                             #     ),
                             # )
+                            lane_ids = (
+                                encoder_cache[tls_id]
+                                .get("_enc_core", {})
+                                .get("lane_ids", [])
+                                if use_expert_features
+                                else encoder_cache[tls_id].get("lane_ids", [])
+                            )
+                            num_lanes = max(1, len(lane_ids))
+
                             r = reward_throughput_plus_softmax_queue(
                                 tls_id=tls_id,
                                 sim_time=sim_t,
@@ -466,9 +493,9 @@ def run_ppo_tsc(
                         ).astype(np.float32)
 
                         # OLD: only work with single scenario encoder
-                        num_lanes = max(
-                            1, len(encoder_cache[tls_id].get("lane_ids", []))
-                        )
+                        # num_lanes = max(
+                        #     1, len(encoder_cache[tls_id].get("lane_ids", []))
+                        # )
                         # NEW: combined encoder uses namespaced cache
                         # num_lanes = max(
                         #     1,
@@ -478,6 +505,14 @@ def run_ppo_tsc(
                         #         .get("lane_ids", [])
                         #     ),
                         # )
+                        lane_ids = (
+                            encoder_cache[tls_id]
+                            .get("_enc_core", {})
+                            .get("lane_ids", [])
+                            if use_expert_features
+                            else encoder_cache[tls_id].get("lane_ids", [])
+                        )
+                        num_lanes = max(1, len(lane_ids))
 
                         # [NEW BLOCK] close previous interval and push to PPO rollout buffer
                         if (
@@ -691,6 +726,7 @@ def run_ppo_tsc(
             "traffic_scale_mean": float(traffic_scale_mean),
             "traffic_scale_std": float(traffic_scale_std),
             "saved_unix_time": float(time.time()),
+            "use_expert_features": bool(use_expert_features),
         }
 
         torch.save(
@@ -752,6 +788,13 @@ def main() -> None:
     ap.add_argument("--save-dir", type=str, default="saved_models_ppo")
     ap.add_argument("--max-time", type=float, default=1e18)
 
+    # control flags
+    ap.add_argument(
+        "--use-expert-features",
+        action="store_true",
+        help="Use combined encoder (core scene encoder + expert_feature_extractor). Default: off.",
+    )
+
     args = ap.parse_args()
 
     run_ppo_tsc(
@@ -794,6 +837,7 @@ def main() -> None:
         gae_lambda=float(args.gae_lambda),
         ent_coef=float(args.ent_coef),
         vf_coef=float(args.vf_coef),
+        use_expert_features=bool(args.use_expert_features),
     )
 
 
