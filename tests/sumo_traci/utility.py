@@ -557,6 +557,81 @@ def reward_softmax_queue_from_encoded_state(
     return -penalty
 
 
+# =======================
+# [NEW] softmax-weighted waiting-time barrier (smooth "max-wait" approximation)
+# =======================
+def reward_softmax_wait_barrier_from_encoded_state(
+    state_vec: Sequence[float],
+    *,
+    num_lanes: int,
+    lane_block_size: int = 4,
+    wait_offset_in_block: int = 3,  # [queue, veh_count, speed, waiting_time]
+    wait_ref_s: float = 60.0,  # normalize waits by this (seconds)
+    softmax_beta: float = 10.0,
+    barrier_start_s: float = 30.0,  # no penalty until soft-wait exceeds this
+    barrier_power: float = 1.0,
+    clip_nonnegative: bool = True,
+) -> float:
+    """
+    Smooth waiting-time barrier reward (negative).
+
+    Steps:
+      1) Extract per-lane waiting times from encoded state
+      2) Normalize by wait_ref_s
+      3) Compute softmax-weighted mean wait (smooth max-like)
+      4) Apply a threshold barrier: penalty = max(0, soft_wait - start)^power
+      5) reward = -penalty
+
+    Returns:
+      wait_reward <= 0
+    """
+    if num_lanes <= 0:
+        raise ValueError("num_lanes must be > 0")
+    if wait_ref_s <= 0.0:
+        raise ValueError("wait_ref_s must be > 0")
+    if softmax_beta <= 0.0:
+        raise ValueError("softmax_beta must be > 0")
+    if barrier_power < 1.0:
+        raise ValueError("barrier_power must be >= 1.0")
+
+    expected_min_len = num_lanes * lane_block_size
+    if len(state_vec) < expected_min_len:
+        raise ValueError(
+            f"state_vec too short: len={len(state_vec)} < {expected_min_len} "
+            f"(num_lanes={num_lanes}, lane_block_size={lane_block_size})"
+        )
+
+    # ---- extract + normalize waiting times ----
+    waits = []
+    inv_ref = 1.0 / float(wait_ref_s)
+    for i in range(num_lanes):
+        idx = i * lane_block_size + wait_offset_in_block
+        w = float(state_vec[idx])
+        if clip_nonnegative and w < 0.0:
+            w = 0.0
+        waits.append(w * inv_ref)  # normalized wait
+
+    waits = np.asarray(waits, dtype=np.float64)
+
+    # ---- softmax weights over waits (smooth max) ----
+    beta = float(softmax_beta)
+    logits = beta * waits
+    logits = logits - float(np.max(logits))  # stabilize
+    exps = np.exp(logits)
+    weights = exps / float(np.sum(exps) + 1e-12)
+
+    soft_wait = float(np.sum(weights * waits))
+
+    # ---- barrier threshold in normalized units ----
+    start = float(barrier_start_s) * inv_ref
+    overflow = soft_wait - start
+    if overflow <= 0.0:
+        return 0.0
+
+    penalty = overflow ** float(barrier_power)
+    return -float(penalty)
+
+
 def _get_tls_out_lanes(tls_id: str) -> list[str]:
     """
     Outgoing lanes (downstream of the intersection) derived from controlled links.
@@ -785,4 +860,103 @@ def reward_throughput_plus_softmax_queue(
             lo, hi = hi, lo
         r = _clip(r, lo, hi)
 
+    return float(r)
+
+
+# =======================
+# [NEW] composite reward: throughput + softmax queue + delta softmax queue + softmax wait barrier
+# =======================
+def reward_throughput_plus_softmax_queue_deltaq_plus_softmax_wait_barrier_v2(
+    *,
+    tls_id: str,
+    sim_time: float,
+    state_vec: Sequence[float],
+    cache: Dict,
+    num_lanes: int,
+    throughput_ref_veh_per_s: float,
+    queue_ref_veh: float,
+    wait_ref_s: float = 60.0,
+    wait_barrier_start_s: float = 30.0,
+    # ---- weights (recommended defaults below) ----
+    w_throughput: float = 1.0,
+    w_queue: float = 1.0,
+    w_delta_queue: float = 0.5,
+    w_wait_barrier: float = 0.5,
+    # ---- queue term params ----
+    queue_power: float = 1.0,
+    softmax_queue_beta: float = 5.0,
+    # ---- wait term params ----
+    softmax_wait_beta: float = 10.0,
+    wait_barrier_power: float = 1.0,
+    # ---- encoding layout ----
+    lane_block_size: int = 4,
+    queue_offset_in_block: int = 0,
+    wait_offset_in_block: int = 3,
+) -> float:
+    """
+    Reward terms:
+      1) Throughput term (normalized by throughput_ref_veh_per_s, NO CLIP)
+      2) Softmax queue penalty (negative)
+      3) Delta softmax queue improvement: (prev_penalty - cur_penalty) (positive if improved)
+      4) Softmax wait barrier penalty (negative): smooth "max-wait" above a threshold
+
+    Notes:
+      - No final reward clipping: uses full reward range.
+      - Delta term uses cached previous softmax-queue penalty per TLS.
+    """
+    if throughput_ref_veh_per_s <= 0.0:
+        raise ValueError("throughput_ref_veh_per_s must be > 0")
+    if queue_ref_veh <= 0.0:
+        raise ValueError("queue_ref_veh must be > 0")
+    if wait_ref_s <= 0.0:
+        raise ValueError("wait_ref_s must be > 0")
+
+    # 1) Throughput (veh/s) over last decision interval, normalized (no clamp)
+    thr = reward_throughput_per_second_on_decision(sim_time=sim_time, cache=cache)
+    thr_norm = float(thr) / float(throughput_ref_veh_per_s)
+
+    # 2) Absolute softmax queue reward (negative)
+    q_reward = reward_softmax_queue_from_encoded_state(
+        state_vec,
+        num_lanes=num_lanes,
+        lane_block_size=lane_block_size,
+        queue_offset_in_block=queue_offset_in_block,
+        power=queue_power,
+        scale=queue_ref_veh,
+        softmax_beta=softmax_queue_beta,
+        clip_nonnegative=True,
+    )
+    # convert reward -> penalty scalar for delta
+    q_penalty = -float(q_reward)  # >= 0
+
+    # 3) Delta softmax queue improvement (positive if queues improved)
+    prev_key = f"_rw_prev_softmax_q_penalty::{tls_id}"
+    prev_penalty = cache.get(prev_key, None)
+    cache[prev_key] = q_penalty
+
+    if prev_penalty is None:
+        delta_q = 0.0
+    else:
+        delta_q = float(prev_penalty) - float(q_penalty)  # >0 if improved
+
+    # 4) Softmax wait barrier (negative)
+    wait_reward = reward_softmax_wait_barrier_from_encoded_state(
+        state_vec,
+        num_lanes=num_lanes,
+        lane_block_size=lane_block_size,
+        wait_offset_in_block=wait_offset_in_block,
+        wait_ref_s=wait_ref_s,
+        softmax_beta=softmax_wait_beta,
+        barrier_start_s=wait_barrier_start_s,
+        barrier_power=wait_barrier_power,
+        clip_nonnegative=True,
+    )
+
+    # Final combined reward (no clipping)
+    r = (
+        float(w_throughput) * float(thr_norm)
+        + float(w_queue) * float(q_reward)
+        + float(w_delta_queue) * float(delta_q)
+        + float(w_wait_barrier) * float(wait_reward)
+    )
     return float(r)

@@ -79,6 +79,10 @@ def encode_state_for_policy(
     meta_encoder_name: str,
     use_expert_features: bool,
     zero_expert_features: bool,
+    # granular expert ablation
+    zero_expert_dims: List[int],
+    noise_expert_dims: List[int],
+    noise_sigma: float,
 ) -> Tuple[np.ndarray, int]:
     """
     Returns:
@@ -107,6 +111,17 @@ def encode_state_for_policy(
                 tsc_isolated_intersection_feature_vector(tls_id, cache=sem_cache),
                 dtype=np.float32,
             )
+
+        # granular expert ablation
+        if (not zero_expert_features) and expert.size > 0:
+            for d in zero_expert_dims:
+                if 0 <= d < expert.shape[0]:
+                    expert[d] = 0.0
+
+            if noise_sigma > 0 and len(noise_expert_dims) > 0:
+                for d in noise_expert_dims:
+                    if 0 <= d < expert.shape[0]:
+                        expert[d] += np.random.normal(0.0, noise_sigma)
 
         return np.concatenate([core, expert], axis=0), core_dim
 
@@ -236,6 +251,16 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
     # ablation: only makes sense if checkpoint expects expert features
     zero_expert = bool(args.zero_expert)
 
+    def _parse_dim_list(s: str) -> List[int]:
+        s = (s or "").strip()
+        if not s:
+            return []
+        return [int(x) for x in s.split(",") if x.strip()]
+
+    zero_dims = _parse_dim_list(args.zero_expert_dims)
+    noise_dims = _parse_dim_list(args.noise_expert_dims)
+    noise_sigma = float(args.noise_sigma)
+
     # logging setup
     log_dir = Path(args.log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -247,6 +272,7 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
         if (args.zero_expert and bool(meta.get("use_expert_features", False)))
         else "normal"
     )
+    print(f"> Eval mode: {mode}")
     base = f"eval_{meta.get('run_name','run')}__{tls_id}__{mode}{tag}__{ts}"
     jsonl_path = log_dir / f"{base}.jsonl"
     summary_path = log_dir / f"{base}_summary.json"
@@ -264,6 +290,13 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
         "traffic_scale": float(traffic_scale),
         "sumo_seed_base": int(sumo_seed_base),
     }
+    header.update(
+        {
+            "zero_expert_dims": zero_dims,
+            "noise_expert_dims": noise_dims,
+            "noise_sigma": noise_sigma,
+        }
+    )
     jsonl_f.write(json.dumps(header, separators=(",", ":")) + "\n")
     jsonl_f.flush()
 
@@ -303,6 +336,17 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
         action_counts = np.zeros((action_dim,), dtype=np.int32)
         switches = 0
         last_action = None
+        # --- policy-probability stats (decision points) ---
+        pi_sum = np.zeros((action_dim,), dtype=np.float64)
+        pi_entropy_sum = 0.0
+        pi_min_sum = 0.0
+        pi_max_sum = 0.0
+        n_decisions = 0
+        # --- empirical action-distribution stats (over episode) ---
+        a_interval_count = np.zeros((action_dim,), dtype=np.int32)
+        a_reward_sum = np.zeros((action_dim,), dtype=np.float64)
+        a_thr_sum = np.zeros((action_dim,), dtype=np.float64)
+        a_q_sum = np.zeros((action_dim,), dtype=np.float64)
 
         start_sumo(
             sumocfg,
@@ -366,6 +410,9 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
                             meta_encoder_name=encoder_name,
                             use_expert_features=use_expert_features,
                             zero_expert_features=zero_expert and use_expert_features,
+                            zero_expert_dims=zero_dims,
+                            noise_expert_dims=noise_dims,
+                            noise_sigma=noise_sigma,
                         )
                         num_lanes = get_num_lanes_from_cache(
                             cache_root, use_expert_features
@@ -396,6 +443,14 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
                         q_reward_sum += float(q_reward)
                         n_intervals += 1
 
+                        # --- empirical action-distribution metrics update ---
+                        if tls_state.prev_action is not None:
+                            pa = int(tls_state.prev_action)
+                            a_interval_count[pa] += 1
+                            a_reward_sum[pa] += float(r)
+                            a_thr_sum[pa] += float(thr_norm)
+                            a_q_sum[pa] += float(q_reward)
+
                     break  # done
 
                 # decision point
@@ -407,6 +462,9 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
                         meta_encoder_name=encoder_name,
                         use_expert_features=use_expert_features,
                         zero_expert_features=zero_expert and use_expert_features,
+                        zero_expert_dims=zero_dims,
+                        noise_expert_dims=noise_dims,
+                        noise_sigma=noise_sigma,
                     )
                     num_lanes = get_num_lanes_from_cache(
                         cache_root, use_expert_features
@@ -438,6 +496,15 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
                         thr_norm_sum += float(thr_norm)
                         q_reward_sum += float(q_reward)
                         n_intervals += 1
+
+                        # --- empirical action-distribution metrics update ---
+                        if tls_state.prev_action is not None:
+                            pa = int(tls_state.prev_action)
+                            a_interval_count[pa] += 1
+                            a_reward_sum[pa] += float(r)
+                            a_thr_sum[pa] += float(thr_norm)
+                            a_q_sum[pa] += float(q_reward)
+
                     else:
                         # first controlled decision: initialize throughput window
                         _ = reward_throughput_per_second_on_decision(
@@ -449,6 +516,18 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
                         a = agent.act_greedy(s_cur)
                     else:
                         a, _logp, _v = agent.act(s_cur)
+
+                    # --- policy distribution at this decision ---
+                    logits, probs, _v = agent.forward_logits_value(
+                        s_cur, return_probs=True, to_cpu=True
+                    )
+                    p = probs.numpy()[0]  # (action_dim,)
+                    pi_sum += p
+                    pi_entropy_sum += float(-(p * np.log(np.clip(p, 1e-12, 1.0))).sum())
+                    pi_min_sum += float(p.min())
+                    pi_max_sum += float(p.max())
+                    n_decisions += 1
+
                     action_counts[int(a)] += 1
                     if last_action is not None and int(a) != int(last_action):
                         switches += 1
@@ -505,6 +584,41 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
                 "switches": int(switches),
                 "switch_rate_per_min": float(switch_rate_per_min),
             }
+            mean_pi = (pi_sum / max(1, n_decisions)).tolist()
+            rec.update(
+                {
+                    "n_decisions": int(n_decisions),
+                    "mean_pi": mean_pi,
+                    "pi_entropy_mean": float(pi_entropy_sum / max(1, n_decisions)),
+                    "pi_min_mean": float(pi_min_sum / max(1, n_decisions)),
+                    "pi_max_mean": float(pi_max_sum / max(1, n_decisions)),
+                }
+            )
+            # --- empirical action-distribution metrics ---
+            act_total = int(action_counts.sum())
+            p_emp = action_counts.astype(np.float64) / max(1, act_total)
+            emp_entropy = float(-(p_emp * np.log(np.clip(p_emp, 1e-12, 1.0))).sum())
+            emp_neff = float(1.0 / np.sum(p_emp * p_emp))  # 1 / sum(p^2)
+            min_action_frac = float(p_emp.min())
+            rec.update(
+                {
+                    "emp_action_entropy": emp_entropy,
+                    "emp_action_neff": emp_neff,
+                    "min_action_frac": min_action_frac,
+                }
+            )
+
+            # empirical action-distribution per-action means
+            a_denom = np.maximum(1, a_interval_count).astype(np.float64)
+            rec.update(
+                {
+                    "a_interval_count": a_interval_count.tolist(),
+                    "a_reward_mean": (a_reward_sum / a_denom).tolist(),
+                    "a_thr_norm_mean": (a_thr_sum / a_denom).tolist(),
+                    "a_q_reward_mean": (a_q_sum / a_denom).tolist(),
+                }
+            )
+
             jsonl_f.write(json.dumps(rec, separators=(",", ":")) + "\n")
             jsonl_f.flush()
             print(
@@ -620,6 +734,25 @@ def main() -> None:
         "--zero-expert",
         action="store_true",
         help="If checkpoint uses expert features, zero the expert slice at inference time.",
+    )
+    # granular expert ablation
+    ap.add_argument(
+        "--zero-expert-dims",
+        type=str,
+        default="",
+        help="Comma-separated expert dims to zero (e.g. '0,3,7')",
+    )
+    ap.add_argument(
+        "--noise-expert-dims",
+        type=str,
+        default="",
+        help="Comma-separated expert dims to add Gaussian noise",
+    )
+    ap.add_argument(
+        "--noise-sigma",
+        type=float,
+        default=0.05,
+        help="Stddev for noise applied to --noise-expert-dims",
     )
 
     # reward decomposition knobs (match training defaults unless overridden)

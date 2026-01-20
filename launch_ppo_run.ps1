@@ -17,8 +17,8 @@ Set-Location $WorkDir
   --episode-len 3600 `
   --warmup 100 `
   --episodes 300 `
-  --seed 519 `
-  --sumo-seed 514 `
+  --seed 520 `
+  --sumo-seed 515 `
   --delay-ms 0 `
   --hold 5.0 `
   --device cuda `
@@ -48,6 +48,6 @@ Set-Location $WorkDir
   --top2-w2 0.3 `
   --reward-clip-lo -3.0 `
   --reward-clip-hi 3.0 `
-#   --use-expert-features
+#    --use-expert-features
 
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

@@ -97,7 +97,12 @@ def _explained_variance(y_true: np.ndarray, y_pred: np.ndarray) -> float:
 
 
 def tb_log_rollout_diagnostics(
-    writer: SummaryWriter, tls_id: str, step: int, buf
+    writer: SummaryWriter,
+    tls_id: str,
+    step: int,
+    buf,
+    agent: PPOAgent,
+    action_dim: int,
 ) -> None:
     """
     Logs rollout-level diagnostics to TensorBoard.
@@ -134,6 +139,42 @@ def tb_log_rollout_diagnostics(
         writer.add_scalar(f"{tls_id}/rollout/duration_std", float(np.std(durs)), step)
         writer.add_scalar(f"{tls_id}/rollout/duration_min", float(np.min(durs)), step)
         writer.add_scalar(f"{tls_id}/rollout/duration_max", float(np.max(durs)), step)
+
+    # Action distribution diagnostics
+    acts = _get_attr_any(buf, ["actions", "act", "action"])
+    if acts is not None:
+        acts = np.asarray(acts, dtype=np.int64).reshape(-1)
+        counts = np.bincount(acts, minlength=int(action_dim)).astype(np.float64)
+        p_emp = counts / max(1.0, float(counts.sum()))
+
+        emp_entropy = float(-(p_emp * np.log(np.clip(p_emp, 1e-12, 1.0))).sum())
+        emp_neff = float(1.0 / np.sum(p_emp * p_emp))
+
+        writer.add_scalar(f"{tls_id}/rollout/emp_action_entropy", emp_entropy, step)
+        writer.add_scalar(f"{tls_id}/rollout/emp_action_neff", emp_neff, step)
+        writer.add_scalar(
+            f"{tls_id}/rollout/emp_min_action_frac", float(p_emp.min()), step
+        )
+    # pi distribution diagnostics
+    states = _get_attr_any(buf, ["states", "obs", "observations"])
+    if states is not None:
+        X = np.asarray(states, dtype=np.float32)
+        logits, probs, _v = agent.forward_logits_value(
+            X, return_probs=True, to_cpu=True
+        )
+        P = probs.numpy()  # (B, A)
+        mean_pi = P.mean(axis=0)
+
+        pi_entropy = float(-(mean_pi * np.log(np.clip(mean_pi, 1e-12, 1.0))).sum())
+        pi_neff = float(1.0 / np.sum(mean_pi * mean_pi))
+
+        writer.add_scalar(f"{tls_id}/rollout/pi_entropy", pi_entropy, step)
+        writer.add_scalar(f"{tls_id}/rollout/pi_neff", pi_neff, step)
+        writer.add_scalar(f"{tls_id}/rollout/pi_min", float(mean_pi.min()), step)
+        writer.add_scalar(f"{tls_id}/rollout/pi_max", float(mean_pi.max()), step)
+
+        for a in range(int(action_dim)):
+            writer.add_scalar(f"{tls_id}/rollout/pi_mean/a{a}", float(mean_pi[a]), step)
 
 
 # ---------------------------------------------------------------------------
@@ -445,7 +486,12 @@ def run_ppo_tsc(
 
                                 step = tb_step_decision[tls_id]
                                 tb_log_rollout_diagnostics(
-                                    writer, tls_id, step, buf
+                                    writer,
+                                    tls_id,
+                                    step,
+                                    buf,
+                                    agent=agents[tls_id],
+                                    action_dim=agents[tls_id].action_dim,
                                 )  # [NEW]
                                 stats = agents[tls_id].update(buf)
                                 buf.clear()
@@ -622,7 +668,12 @@ def run_ppo_tsc(
 
                             step = tb_step_decision[tls_id]
                             tb_log_rollout_diagnostics(
-                                writer, tls_id, step, buf
+                                writer,
+                                tls_id,
+                                step,
+                                buf,
+                                agent=agents[tls_id],
+                                action_dim=agents[tls_id].action_dim,
                             )  # [NEW]
                             stats = agents[tls_id].update(buf)
                             buf.clear()
