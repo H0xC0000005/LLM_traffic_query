@@ -1,5 +1,3 @@
-# [NEW FILE] run_ppo_tsc_merged.py
-
 from __future__ import annotations
 
 import os
@@ -122,7 +120,47 @@ def tb_log_rollout_diagnostics(
     if advs is not None:
         advs = advs.astype(np.float32).reshape(-1)
         writer.add_scalar(f"{tls_id}/rollout/adv_mean", float(np.mean(advs)), step)
-        writer.add_scalar(f"{tls_id}/rollout/adv_std", float(np.std(advs)), step)
+        # writer.add_scalar(f"{tls_id}/rollout/adv_std", float(np.std(advs)), step)
+        acts = _get_attr_any(buf, ["actions", "acts", "action"])
+        if acts is not None:
+            acts = acts.astype(np.int64).reshape(-1)
+
+            if acts.shape[0] == advs.shape[0]:
+                n = float(len(acts))
+
+                for a in range(int(action_dim)):
+                    mask = acts == a
+                    cnt = int(mask.sum())
+
+                    # how often action was sampled in this rollout
+                    writer.add_scalar(f"{tls_id}/rollout/action_count/a{a}", cnt, step)
+                    writer.add_scalar(
+                        f"{tls_id}/rollout/action_frac/a{a}", cnt / max(1.0, n), step
+                    )
+
+                    # advantage stats for that action
+                    if cnt > 0:
+                        adv_a = advs[mask]
+                        writer.add_scalar(
+                            f"{tls_id}/rollout/adv_mean/a{a}",
+                            float(np.mean(adv_a)),
+                            step,
+                        )
+                        writer.add_scalar(
+                            f"{tls_id}/rollout/adv_std/a{a}", float(np.std(adv_a)), step
+                        )
+                        writer.add_scalar(
+                            f"{tls_id}/rollout/adv_pos_frac/a{a}",
+                            float(np.mean(adv_a > 0.0)),
+                            step,
+                        )
+                    else:
+                        # no samples => mean advantage is undefined; keep 0 but count=0 exposes it
+                        writer.add_scalar(f"{tls_id}/rollout/adv_mean/a{a}", 0.0, step)
+                        writer.add_scalar(f"{tls_id}/rollout/adv_std/a{a}", 0.0, step)
+                        writer.add_scalar(
+                            f"{tls_id}/rollout/adv_pos_frac/a{a}", 0.0, step
+                        )
 
     if vpred is not None:
         vpred = vpred.astype(np.float32).reshape(-1)
@@ -271,6 +309,12 @@ def run_ppo_tsc(
     queue_ref_veh: float,
     w_throughput: float,
     w_queue: float,
+    w_delta_queue: float,
+    w_wait: float,
+    wait_ref_s: float,
+    wait_barrier_start_s: float,
+    softmax_wait_beta: float,
+    softmax_queue_beta: float,
     queue_power: float,
     top2_w1: float,
     top2_w2: float,
@@ -285,15 +329,24 @@ def run_ppo_tsc(
     gae_lambda: float,
     ent_coef: float,
     vf_coef: float,
-    # control flags
+    # -------------------------------
+    # [NEW] Training-scheme stabilizers
+    # -------------------------------
+    ent_coef_end: Optional[float],
+    ent_coef_decay_updates: int,
+    explore_alpha_start: float,
+    explore_alpha_end: float,
+    explore_alpha_decay_updates: int,
+    target_kl: Optional[float],
+    adv_clip: Optional[float],
+    # control flags & tags
     use_expert_features: bool = False,
+    log_tag: str = "",
 ) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    # encoder_fn = encode_tsc_state_vector_bounded_v2
-    # encoder_fn = encode_tsc_state_vector_combined
     if use_expert_features:
         encoder_fn = encode_tsc_state_vector_combined
         print("[run_ppo_tsc] Using combined encoder with expert features.")
@@ -303,7 +356,9 @@ def run_ppo_tsc(
         print("[run_ppo_tsc] Using core scenario encoder only.")
         time.sleep(3)  # allow user to see the print
 
-    run_name = f"sumo_ppo_seed{seed}_{int(time.time())}"
+    run_name = (
+        f"sumo_ppo_seed{seed}_{(log_tag + '_' if log_tag else '')}{int(time.time())}"
+    )
     writer = SummaryWriter(log_dir=os.path.join(tb_logdir, run_name))
 
     agents: Dict[str, PPOAgent] = {}
@@ -312,6 +367,7 @@ def run_ppo_tsc(
     encoder_cache: Dict[str, dict] = {}
 
     tb_step_decision = {}  # per TLS decision counter
+    kl_early_stop_cum = {}
 
     total_elapsed = 0.0
     for ep in range(int(episodes)):
@@ -347,6 +403,8 @@ def run_ppo_tsc(
                     pending[tls_id] = PendingDecision()
                 if tls_id not in tb_step_decision:
                     tb_step_decision[tls_id] = 0
+                if tls_id not in kl_early_stop_cum:
+                    kl_early_stop_cum[tls_id] = 0
                 if tls_id not in agents:
                     s0 = encoder_fn(
                         tls_id,
@@ -380,6 +438,14 @@ def run_ppo_tsc(
                         gae_lambda=gae_lambda,
                         vf_coef=vf_coef,
                         ent_coef=ent_coef,
+                        # training stabilizers
+                        ent_coef_end=ent_coef_end,
+                        ent_coef_decay_updates=ent_coef_decay_updates,
+                        explore_alpha_start=explore_alpha_start,
+                        explore_alpha_end=explore_alpha_end,
+                        explore_alpha_decay_updates=explore_alpha_decay_updates,
+                        target_kl=target_kl,
+                        adv_clip=adv_clip,
                     )
                     buffers[tls_id] = RolloutBuffer()
 
@@ -446,20 +512,45 @@ def run_ppo_tsc(
                             )
                             num_lanes = max(1, len(lane_ids))
 
-                            r = reward_throughput_plus_softmax_queue(
+                            # r = reward_throughput_plus_softmax_queue(
+                            #     tls_id=tls_id,
+                            #     sim_time=sim_t,
+                            #     state_vec=terminal_state,
+                            #     cache=encoder_cache[tls_id],
+                            #     num_lanes=num_lanes,
+                            #     throughput_ref_veh_per_s=throughput_ref_veh_per_s,
+                            #     queue_ref_veh=queue_ref_veh,
+                            #     w_throughput=w_throughput,
+                            #     w_queue=w_queue,
+                            #     # top2_weights=(top2_w1, top2_w2),
+                            #     queue_power=queue_power,
+                            #     reward_clip=(reward_clip_lo, reward_clip_hi),
+                            # )
+                            r = reward_throughput_plus_softmax_queue_deltaq_plus_softmax_wait_barrier_v2(
                                 tls_id=tls_id,
                                 sim_time=sim_t,
-                                state_vec=terminal_state,
+                                state_vec=cur_state,
                                 cache=encoder_cache[tls_id],
                                 num_lanes=num_lanes,
                                 throughput_ref_veh_per_s=throughput_ref_veh_per_s,
                                 queue_ref_veh=queue_ref_veh,
+                                # [NEW] wait barrier params
+                                wait_ref_s=wait_ref_s,
+                                wait_barrier_start_s=wait_barrier_start_s,
+                                softmax_wait_beta=softmax_wait_beta,
+                                # [NEW] weights for new reward terms
                                 w_throughput=w_throughput,
                                 w_queue=w_queue,
-                                # top2_weights=(top2_w1, top2_w2),
+                                w_delta_queue=w_delta_queue,
+                                w_wait_barrier=w_wait,
+                                # unchanged queue config
                                 queue_power=queue_power,
-                                reward_clip=(reward_clip_lo, reward_clip_hi),
+                                softmax_queue_beta=softmax_queue_beta,
                             )
+
+                            # [IMPORTANT] your v2 reward fn DOES NOT take reward_clip=...
+                            # keep clipping outside (same behavior as before)
+                            r = float(np.clip(r, reward_clip_lo, reward_clip_hi))
 
                             dt_interval = sim_t - float(st.action_start_time)
                             buffers[tls_id].add(
@@ -516,6 +607,31 @@ def run_ppo_tsc(
                                 writer.add_scalar(
                                     f"{tls_id}/ppo/clip_frac", stats["clip_frac"], step
                                 )
+                                kl_stop = int(stats.get("kl_early_stop", 0.0) > 0.5)
+                                kl_early_stop_cum[tls_id] += kl_stop
+                                writer.add_scalar(
+                                    f"{tls_id}/ppo/kl_early_stop", kl_stop, step
+                                )
+                                writer.add_scalar(
+                                    f"{tls_id}/ppo/kl_early_stop_cum",
+                                    kl_early_stop_cum[tls_id],
+                                    step,
+                                )
+                                writer.add_scalar(
+                                    f"{tls_id}/ppo/updates_done",
+                                    stats.get("updates_done", 0.0),
+                                    step,
+                                )
+                                writer.add_scalar(
+                                    f"{tls_id}/ppo/ent_coef",
+                                    stats.get("ent_coef", 0.0),
+                                    step,
+                                )
+                                writer.add_scalar(
+                                    f"{tls_id}/ppo/explore_alpha",
+                                    stats.get("explore_alpha", 0.0),
+                                    step,
+                                )
                     break
 
                 if in_control:
@@ -568,7 +684,21 @@ def run_ppo_tsc(
                             and st.logp is not None
                             and st.value is not None
                         ):
-                            r = reward_throughput_plus_softmax_queue(
+                            # r = reward_throughput_plus_softmax_queue(
+                            #     tls_id=tls_id,
+                            #     sim_time=sim_t,
+                            #     state_vec=cur_state,
+                            #     cache=encoder_cache[tls_id],
+                            #     num_lanes=num_lanes,
+                            #     throughput_ref_veh_per_s=throughput_ref_veh_per_s,
+                            #     queue_ref_veh=queue_ref_veh,
+                            #     w_throughput=w_throughput,
+                            #     w_queue=w_queue,
+                            #     # top2_weights=(top2_w1, top2_w2),
+                            #     queue_power=queue_power,
+                            #     reward_clip=(reward_clip_lo, reward_clip_hi),
+                            # )\
+                            r = reward_throughput_plus_softmax_queue_deltaq_plus_softmax_wait_barrier_v2(
                                 tls_id=tls_id,
                                 sim_time=sim_t,
                                 state_vec=cur_state,
@@ -576,11 +706,18 @@ def run_ppo_tsc(
                                 num_lanes=num_lanes,
                                 throughput_ref_veh_per_s=throughput_ref_veh_per_s,
                                 queue_ref_veh=queue_ref_veh,
+                                # [NEW] wait barrier params
+                                wait_ref_s=wait_ref_s,
+                                wait_barrier_start_s=wait_barrier_start_s,
+                                softmax_wait_beta=softmax_wait_beta,
+                                # [NEW] weights for new reward terms
                                 w_throughput=w_throughput,
                                 w_queue=w_queue,
-                                # top2_weights=(top2_w1, top2_w2),
+                                w_delta_queue=w_delta_queue,
+                                w_wait_barrier=w_wait,
+                                # unchanged queue config
                                 queue_power=queue_power,
-                                reward_clip=(reward_clip_lo, reward_clip_hi),
+                                softmax_queue_beta=5.0,  # keep default, or expose as arg if you want
                             )
                             dt_interval = sim_t - float(
                                 st.action_start_time
@@ -601,7 +738,21 @@ def run_ppo_tsc(
                             writer.add_scalar(f"{tls_id}/train/reward", float(r), step)
                         else:
                             # first controlled action: initialize throughput window (no-op reward)
-                            _ = reward_throughput_plus_softmax_queue(
+                            # _ = reward_throughput_plus_softmax_queue(
+                            #     tls_id=tls_id,
+                            #     sim_time=sim_t,
+                            #     state_vec=cur_state,
+                            #     cache=encoder_cache[tls_id],
+                            #     num_lanes=num_lanes,
+                            #     throughput_ref_veh_per_s=throughput_ref_veh_per_s,
+                            #     queue_ref_veh=queue_ref_veh,
+                            #     w_throughput=0.0,
+                            #     w_queue=0.0,
+                            #     # top2_weights=(top2_w1, top2_w2),
+                            #     queue_power=queue_power,
+                            #     reward_clip=(reward_clip_lo, reward_clip_hi),
+                            # )
+                            _ = reward_throughput_plus_softmax_queue_deltaq_plus_softmax_wait_barrier_v2(
                                 tls_id=tls_id,
                                 sim_time=sim_t,
                                 state_vec=cur_state,
@@ -609,11 +760,18 @@ def run_ppo_tsc(
                                 num_lanes=num_lanes,
                                 throughput_ref_veh_per_s=throughput_ref_veh_per_s,
                                 queue_ref_veh=queue_ref_veh,
+                                # [NEW] wait barrier params (still update caches)
+                                wait_ref_s=wait_ref_s,
+                                wait_barrier_start_s=wait_barrier_start_s,
+                                softmax_wait_beta=softmax_wait_beta,
+                                # [NEW] all weights zero => no-op reward but caches get initialized
                                 w_throughput=0.0,
                                 w_queue=0.0,
-                                # top2_weights=(top2_w1, top2_w2),
+                                w_delta_queue=0.0,
+                                w_wait_barrier=0.0,
+                                # unchanged queue config
                                 queue_power=queue_power,
-                                reward_clip=(reward_clip_lo, reward_clip_hi),
+                                softmax_queue_beta=5.0,
                             )
 
                         # NEW
@@ -769,6 +927,12 @@ def run_ppo_tsc(
             "vf_clip_eps": float(vf_clip_eps),
             "vf_coef": float(vf_coef),
             "ent_coef": float(ent_coef),
+            "ent_coef_end": float(ent_coef_end),
+            "explore_alpha_start": float(explore_alpha_start),
+            "explore_alpha_end": float(explore_alpha_end),
+            "explore_alpha_decay_updates": int(explore_alpha_decay_updates),
+            "target_kl": float(target_kl),
+            "adv_clip": float(adv_clip) if adv_clip is not None else None,
             "gae_lambda": float(gae_lambda),
             "ppo_epochs": int(ppo_epochs),
             "minibatch_size": int(minibatch_size),
@@ -822,6 +986,21 @@ def main() -> None:
     ap.add_argument("--vf-clip-eps", type=float, default=None)
     ap.add_argument("--gae-lambda", type=float, default=0.95)
     ap.add_argument("--ent-coef", type=float, default=0.01)
+    # -------------------------------
+    # [NEW] Training-scheme stabilizers
+    # -------------------------------
+    ap.add_argument("--ent-coef-end", type=float, default=None)
+    ap.add_argument("--ent-coef-decay-updates", type=int, default=0)
+
+    # Uniform ridge exploration: μ = (1-α)π + αU
+    ap.add_argument("--explore-alpha-start", type=float, default=0.0)
+    ap.add_argument("--explore-alpha-end", type=float, default=0.0)
+    ap.add_argument("--explore-alpha-decay-updates", type=int, default=0)
+
+    # PPO update safety knobs
+    ap.add_argument("--target-kl", type=float, default=None)
+    ap.add_argument("--adv-clip", type=float, default=None)
+    # -------------------------------
     ap.add_argument("--vf-coef", type=float, default=0.5)
 
     # Reward (defaults)
@@ -829,6 +1008,12 @@ def main() -> None:
     ap.add_argument("--queue-ref", type=float, default=15.0)
     ap.add_argument("--w-thr", type=float, default=1.0)
     ap.add_argument("--w-queue", type=float, default=1.0)
+    ap.add_argument("--w-delta-queue", type=float, default=0.5)
+    ap.add_argument("--w-wait", type=float, default=0.5)
+    ap.add_argument("--wait-ref", type=float, default=60.0)
+    ap.add_argument("--wait-barrier-start", type=float, default=30.0)
+    ap.add_argument("--softmax-wait-beta", type=float, default=10.0)
+    ap.add_argument("--softmax-queue-beta", type=float, default=4.0)
     ap.add_argument("--queue-power", type=float, default=1.0)
     ap.add_argument("--top2-w1", type=float, default=0.7)
     ap.add_argument("--top2-w2", type=float, default=0.3)
@@ -845,6 +1030,7 @@ def main() -> None:
         action="store_true",
         help="Use combined encoder (core scene encoder + expert_feature_extractor). Default: off.",
     )
+    ap.add_argument("--log-tag", type=str, default="")
 
     args = ap.parse_args()
 
@@ -875,6 +1061,12 @@ def main() -> None:
         queue_ref_veh=float(args.queue_ref),
         w_throughput=float(args.w_thr),
         w_queue=float(args.w_queue),
+        w_delta_queue=float(args.w_delta_queue),
+        w_wait=float(args.w_wait),
+        wait_ref_s=float(args.wait_ref),
+        wait_barrier_start_s=float(args.wait_barrier_start),
+        softmax_wait_beta=float(args.softmax_wait_beta),
+        softmax_queue_beta=float(args.softmax_queue_beta),
         queue_power=float(args.queue_power),
         top2_w1=float(args.top2_w1),
         top2_w2=float(args.top2_w2),
@@ -888,7 +1080,17 @@ def main() -> None:
         gae_lambda=float(args.gae_lambda),
         ent_coef=float(args.ent_coef),
         vf_coef=float(args.vf_coef),
+        # [NEW] Training-scheme stabilizers
+        ent_coef_end=args.ent_coef_end,
+        ent_coef_decay_updates=int(args.ent_coef_decay_updates),
+        explore_alpha_start=float(args.explore_alpha_start),
+        explore_alpha_end=float(args.explore_alpha_end),
+        explore_alpha_decay_updates=int(args.explore_alpha_decay_updates),
+        target_kl=args.target_kl,
+        adv_clip=args.adv_clip,
+        # control flags
         use_expert_features=bool(args.use_expert_features),
+        log_tag=str(args.log_tag),
     )
 
 

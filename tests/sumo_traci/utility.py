@@ -726,86 +726,6 @@ def reward_throughput_per_second_on_decision(
     return count / dt
 
 
-def reward_throughput_plus_top2_queue(
-    *,
-    tls_id: str,
-    sim_time: float,
-    state_vec: Sequence[float],
-    cache: Dict,
-    num_lanes: int,
-    throughput_ref_veh_per_s: float,
-    queue_ref_veh: float,
-    w_throughput: float = 1.0,
-    w_queue: float = 1.0,
-    top2_weights: Tuple[float, float] = (0.7, 0.3),
-    queue_power: float = 1.0,
-    # --- encoding layout ---
-    lane_block_size: int = 4,
-    queue_offset_in_block: int = 0,
-    # --- optional clipping of final reward ---
-    reward_clip: Optional[Tuple[float, float]] = (-1.0, 1.0),
-) -> float:
-    """
-    Composite reward:
-      + normalized average throughput over the whole decision interval
-      - normalized top-2 longest queues (anti-starvation)
-
-    Requires:
-      - throughput_tracker_step(tls_id, cache) is called EVERY simulationStep()
-      - this function is called at each decision point (to close the interval)
-
-    Normalization:
-      throughput_norm = clip(throughput / throughput_ref_veh_per_s, 0, 1)
-      queue_norm is handled by passing scale=queue_ref_veh into the top-2 queue reward
-        (so queues are effectively measured as a fraction of queue_ref_veh)
-
-    Final:
-      r = w_throughput * throughput_norm + w_queue * queue_reward
-      where queue_reward <= 0
-
-    Choose refs:
-      - throughput_ref_veh_per_s: a reasonable "good" throughput (empirical 90-95% percentile under fixed-time works well)
-      - queue_ref_veh: lane storage cap in vehicles (or a conservative threshold where you consider it 'too long')
-    """
-
-    def _clip(x: float, lo: float, hi: float) -> float:
-        return lo if x < lo else hi if x > hi else x
-
-    if throughput_ref_veh_per_s <= 0.0:
-        raise ValueError("throughput_ref_veh_per_s must be > 0")
-    if queue_ref_veh <= 0.0:
-        raise ValueError("queue_ref_veh must be > 0")
-
-    # 1) Throughput averaged over the whole span since last decision (veh/s)
-    thr = reward_throughput_per_second_on_decision(sim_time=sim_time, cache=cache)
-    thr_norm = _clip(float(thr) / float(throughput_ref_veh_per_s), 0.0, 1.0)
-
-    # 2) Top-2 queue penalty (negative), normalized by queue_ref_veh via scale
-    q_reward = reward_top2_queue_from_encoded_state(
-        state_vec,
-        num_lanes=num_lanes,
-        lane_block_size=lane_block_size,
-        queue_offset_in_block=queue_offset_in_block,
-        weights=top2_weights,
-        power=queue_power,
-        scale=queue_ref_veh,  # <-- key: normalize queue magnitudes
-        clip_nonnegative=True,
-    )
-    # q_reward is <= 0
-    print(
-        f">> reward: thr={thr:.3f} (norm {thr_norm:.3f}), top2_queue_reward={q_reward:.5f}"
-    )
-    r = float(w_throughput) * thr_norm + float(w_queue) * float(q_reward)
-
-    if reward_clip is not None:
-        lo, hi = float(reward_clip[0]), float(reward_clip[1])
-        if lo > hi:
-            lo, hi = hi, lo
-        r = _clip(r, lo, hi)
-
-    return float(r)
-
-
 # =======================
 # [NEW] composite reward variant using softmax queue term
 # =======================
@@ -958,5 +878,8 @@ def reward_throughput_plus_softmax_queue_deltaq_plus_softmax_wait_barrier_v2(
         + float(w_queue) * float(q_reward)
         + float(w_delta_queue) * float(delta_q)
         + float(w_wait_barrier) * float(wait_reward)
+    )
+    print(
+        f">> reward: thr={thr:.3f} (norm {thr_norm:.3f}), q={q_reward:.3f}, delta_q={delta_q:.3f}, wait_barrier={wait_reward:.3f}"
     )
     return float(r)

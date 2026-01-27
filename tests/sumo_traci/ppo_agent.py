@@ -561,6 +561,27 @@ class PPOAgent:
     gae_lambda: float = 0.95
     vf_coef: float = 0.5
     ent_coef: float = 0.01
+    # -------------------------------
+    # [NEW] Entropy schedule (linear)
+    # If ent_coef_end is None -> fixed ent_coef.
+    # -------------------------------
+    ent_coef_end: Optional[float] = None
+    ent_coef_decay_updates: int = 0
+
+    # -------------------------------
+    # [NEW] Uniform ridge exploration (mixture policy μ)
+    # μ = (1-α)π + αU, with optional linear decay of α.
+    # -------------------------------
+    explore_alpha_start: float = 0.0
+    explore_alpha_end: float = 0.0
+    explore_alpha_decay_updates: int = 0
+
+    # -------------------------------
+    # [NEW] PPO safety knobs
+    # -------------------------------
+    target_kl: Optional[float] = None  # e.g. 0.02 to early-stop PPO epochs
+    adv_clip: Optional[float] = None  # e.g. 5.0 to clip advantages
+
     max_grad_norm: float = 0.5
 
     def __post_init__(self) -> None:
@@ -569,13 +590,6 @@ class PPOAgent:
         self.device_t = torch.device(self.device)
 
         torch.manual_seed(int(self.seed))
-        # self.model = ActorCriticV2(
-        #     self.state_dim,
-        #     self.action_dim,
-        #     hidden_dim=self.hidden_dim,
-        #     num_layers=self.n_layer,
-        #     use_skip=self.use_skip,
-        # ).to(self.device_t)
         self.model = ActorCriticV3(
             self.state_dim,
             self.action_dim,
@@ -591,13 +605,52 @@ class PPOAgent:
                 {"params": self.model.v.parameters(), "lr": self.critic_lr},
             ],
         )
+        self._update_idx: int = 0
         pass
+
+    # =======================
+    # [NEW] schedule helpers
+    # =======================
+    @staticmethod
+    def _linear_schedule(start: float, end: float, t: int, t_end: int) -> float:
+        if t_end <= 0:
+            return float(end)
+        frac = min(max(float(t) / float(t_end), 0.0), 1.0)
+        return float(start + frac * (end - start))
+
+    def _current_ent_coef(self) -> float:
+        if self.ent_coef_end is None:
+            return float(self.ent_coef)
+        return self._linear_schedule(
+            float(self.ent_coef),
+            float(self.ent_coef_end),
+            int(self._update_idx),
+            int(self.ent_coef_decay_updates),
+        )
+
+    def _current_explore_alpha(self) -> float:
+        # α for mixture policy μ = (1-α)π + αU
+        return self._linear_schedule(
+            float(self.explore_alpha_start),
+            float(self.explore_alpha_end),
+            int(self._update_idx),
+            int(self.explore_alpha_decay_updates),
+        )
+
+    # =======================
 
     @torch.no_grad()
     def act(self, state_vec: np.ndarray) -> tuple[int, float, float]:
         """
-        Sample action from the policy (training).
-        Returns: (action, logp, value)
+        Sample action from the *behavior policy* (training).
+
+        Behavior policy is a mixture:
+          μ(a|s) = (1-α)π(a|s) + α * Uniform(a)
+
+        IMPORTANT:
+          - We store logp under μ so PPO ratios stay consistent.
+
+        Returns: (action, logp_mu, value)
         """
         x = (
             torch.from_numpy(state_vec.astype(np.float32))
@@ -605,9 +658,22 @@ class PPOAgent:
             .to(self.device_t)
         )
         logits, value = self.model(x)
-        dist = Categorical(logits=logits)
-        a = dist.sample()
-        logp = dist.log_prob(a)
+
+        # π distribution
+        dist_pi = Categorical(logits=logits)
+        probs_pi = dist_pi.probs  # [1, A]
+
+        alpha = float(self._current_explore_alpha())
+        if alpha > 0.0:
+            a_dim = int(self.action_dim)
+            probs_mu = (1.0 - alpha) * probs_pi + alpha * (1.0 / float(a_dim))
+            dist_mu = Categorical(probs=probs_mu)
+            a = dist_mu.sample()
+            logp = dist_mu.log_prob(a)  # log μ(a|s)
+        else:
+            a = dist_pi.sample()
+            logp = dist_pi.log_prob(a)  # log π(a|s) == log μ(a|s) when α=0
+
         return int(a.item()), float(logp.item()), float(value.item())
 
     @torch.no_grad()
@@ -658,13 +724,37 @@ class PPOAgent:
         return logits, probs, value
 
     def _evaluate(
-        self, states: torch.Tensor, actions: torch.Tensor
+        self,
+        states: torch.Tensor,
+        actions: torch.Tensor,
+        *,
+        alpha: float,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Evaluate log-prob under behavior policy μ and entropy under π.
+        alpha is the ridge exploration coefficient as regularization.
+
+        Returns:
+          logps_mu: [B]
+          entropy_pi: [B]
+          values: [B]
+        """
         logits, values = self.model(states)
-        dist = Categorical(logits=logits)
-        logps = dist.log_prob(actions)
-        entropy = dist.entropy()
-        return logps, entropy, values
+        dist_pi = Categorical(logits=logits)
+        probs_pi = dist_pi.probs  # [B, A]
+        entropy_pi = dist_pi.entropy()
+
+        if alpha > 0.0:
+            a_dim = int(self.action_dim)
+            probs_mu = (1.0 - float(alpha)) * probs_pi + float(alpha) * (
+                1.0 / float(a_dim)
+            )
+            sel = probs_mu.gather(1, actions.view(-1, 1)).squeeze(1).clamp_min(1e-12)
+            logps_mu = torch.log(sel)
+        else:
+            logps_mu = dist_pi.log_prob(actions)
+
+        return logps_mu, entropy_pi, values
 
     def update(self, buf: RolloutBuffer) -> Dict[str, float]:
         assert (
@@ -679,15 +769,23 @@ class PPOAgent:
         returns = torch.from_numpy(buf.returns).to(self.device_t)
         advs = torch.from_numpy(buf.advs).to(self.device_t)
 
+        # [NEW] per-update scheduled coefficients (held constant during this PPO update)
+        ent_coef_cur = float(self._current_ent_coef())
+        alpha_cur = float(self._current_explore_alpha())
+
         stats = {
             "policy_loss": 0.0,
             "value_loss": 0.0,
             "entropy": 0.0,
             "approx_kl": 0.0,
             "clip_frac": 0.0,
-            "vf_clip_frac": 0.0,  # [NEW]
+            "vf_clip_frac": 0.0,
+            "ent_coef": 0.0,
+            "explore_alpha": 0.0,
+            "early_stop": 0.0,
         }
         n_updates = 0
+        early_stop = False
 
         for _ in range(int(self.epochs)):
             for mb_idx in buf.minibatches(
@@ -700,15 +798,20 @@ class PPOAgent:
                 mb_returns = returns[mb_idx]
                 mb_advs = advs[mb_idx]
 
-                logps, entropy, values = self._evaluate(mb_states, mb_actions)
+                # [NEW] advantage clipping
+                if self.adv_clip is not None:
+                    mb_advs = torch.clamp(
+                        mb_advs, -float(self.adv_clip), float(self.adv_clip)
+                    )
+
+                # [NEW] logp under μ, entropy under π
+                logps, entropy, values = self._evaluate(
+                    mb_states, mb_actions, alpha=alpha_cur
+                )
 
                 ratio = torch.exp(logps - mb_old_logps)
                 clipped = torch.clamp(ratio, 1.0 - self.clip_eps, 1.0 + self.clip_eps)
                 pg_loss = -torch.min(ratio * mb_advs, clipped * mb_advs).mean()
-
-                # --- OLD ---------------------------------------------------------
-                # v_loss = 0.5 * (mb_returns - values).pow(2).mean()
-                # ---------------------------------------------------------------
 
                 # --- [NEW] PPO value clipping ------------------------------------
                 if self.vf_clip_eps is None:
@@ -732,7 +835,8 @@ class PPOAgent:
                 # ----------------------------------------------------------------
                 ent = entropy.mean()
 
-                loss = pg_loss + self.vf_coef * v_loss - self.ent_coef * ent
+                # [NEW] scheduled entropy coefficient
+                loss = pg_loss + self.vf_coef * v_loss - ent_coef_cur * ent
 
                 self.opt.zero_grad(set_to_none=True)
                 loss.backward()
@@ -741,6 +845,13 @@ class PPOAgent:
 
                 with torch.no_grad():
                     approx_kl = 0.5 * ((logps - mb_old_logps).pow(2)).mean()
+
+                    # [NEW] target-KL early stop
+                    if self.target_kl is not None and float(approx_kl.item()) > float(
+                        self.target_kl
+                    ):
+                        early_stop = True
+
                     clip_frac = (torch.abs(ratio - 1.0) > self.clip_eps).float().mean()
 
                 stats["policy_loss"] += float(pg_loss.item())
@@ -751,8 +862,21 @@ class PPOAgent:
                 stats["vf_clip_frac"] += float(vf_clip_frac.item())  # [NEW]
                 n_updates += 1
 
+                if early_stop:
+                    break
+            if early_stop:
+                break
         if n_updates > 0:
             for k in list(stats.keys()):
                 stats[k] /= n_updates
+
+        # [NEW] record current schedule coefficients and early-stop flag
+        stats["ent_coef"] = float(ent_coef_cur)
+        stats["explore_alpha"] = float(alpha_cur)
+        stats["early_stop"] = float(1.0 if early_stop else 0.0)
+        stats["update_idx"] = int(self._update_idx)
+        stats["updates_done"] = float(n_updates)
+        # advance schedules AFTER finishing this PPO update
+        self._update_idx += 1
 
         return stats

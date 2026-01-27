@@ -2,9 +2,11 @@
 /__pycache__
 /plots
 tensorboard_logs
+tsb_*
 *.pyc
 dqn_tsc_models
 ppo_tsc_models
+ppo_tsc_models*
 eval_results
 expert_function_cache
 
