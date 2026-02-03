@@ -27,7 +27,6 @@ import torch  # imported after numpy (Windows OpenMP duplicate init mitigation)
 from ppo_agent import PPOAgent, RolloutBuffer
 from utility import *
 from scene_encoder import (
-    encode_tsc_state_vector_bounded,
     encode_tsc_state_vector_bounded_v2,
 )
 from expert_feature_extractor import *
@@ -133,34 +132,34 @@ def tb_log_rollout_diagnostics(
                     cnt = int(mask.sum())
 
                     # how often action was sampled in this rollout
-                    writer.add_scalar(f"{tls_id}/rollout/action_count/a{a}", cnt, step)
+                    # writer.add_scalar(f"{tls_id}/rollout/action_count/a{a}", cnt, step)
                     writer.add_scalar(
                         f"{tls_id}/rollout/action_frac/a{a}", cnt / max(1.0, n), step
                     )
 
-                    # advantage stats for that action
-                    if cnt > 0:
-                        adv_a = advs[mask]
-                        writer.add_scalar(
-                            f"{tls_id}/rollout/adv_mean/a{a}",
-                            float(np.mean(adv_a)),
-                            step,
-                        )
-                        writer.add_scalar(
-                            f"{tls_id}/rollout/adv_std/a{a}", float(np.std(adv_a)), step
-                        )
-                        writer.add_scalar(
-                            f"{tls_id}/rollout/adv_pos_frac/a{a}",
-                            float(np.mean(adv_a > 0.0)),
-                            step,
-                        )
-                    else:
-                        # no samples => mean advantage is undefined; keep 0 but count=0 exposes it
-                        writer.add_scalar(f"{tls_id}/rollout/adv_mean/a{a}", 0.0, step)
-                        writer.add_scalar(f"{tls_id}/rollout/adv_std/a{a}", 0.0, step)
-                        writer.add_scalar(
-                            f"{tls_id}/rollout/adv_pos_frac/a{a}", 0.0, step
-                        )
+                    # # advantage stats for that action
+                    # if cnt > 0:
+                    #     adv_a = advs[mask]
+                    #     writer.add_scalar(
+                    #         f"{tls_id}/rollout/adv_mean/a{a}",
+                    #         float(np.mean(adv_a)),
+                    #         step,
+                    #     )
+                    #     writer.add_scalar(
+                    #         f"{tls_id}/rollout/adv_std/a{a}", float(np.std(adv_a)), step
+                    #     )
+                    #     writer.add_scalar(
+                    #         f"{tls_id}/rollout/adv_pos_frac/a{a}",
+                    #         float(np.mean(adv_a > 0.0)),
+                    #         step,
+                    #     )
+                    # else:
+                    #     # no samples => mean advantage is undefined; keep 0 but count=0 exposes it
+                    #     writer.add_scalar(f"{tls_id}/rollout/adv_mean/a{a}", 0.0, step)
+                    #     writer.add_scalar(f"{tls_id}/rollout/adv_std/a{a}", 0.0, step)
+                    #     writer.add_scalar(
+                    #         f"{tls_id}/rollout/adv_pos_frac/a{a}", 0.0, step
+                    #     )
 
     if vpred is not None:
         vpred = vpred.astype(np.float32).reshape(-1)
@@ -194,25 +193,25 @@ def tb_log_rollout_diagnostics(
             f"{tls_id}/rollout/emp_min_action_frac", float(p_emp.min()), step
         )
     # pi distribution diagnostics
-    states = _get_attr_any(buf, ["states", "obs", "observations"])
-    if states is not None:
-        X = np.asarray(states, dtype=np.float32)
-        logits, probs, _v = agent.forward_logits_value(
-            X, return_probs=True, to_cpu=True
-        )
-        P = probs.numpy()  # (B, A)
-        mean_pi = P.mean(axis=0)
+    # states = _get_attr_any(buf, ["states", "obs", "observations"])
+    # if states is not None:
+    #     X = np.asarray(states, dtype=np.float32)
+    #     logits, probs, _v = agent.forward_logits_value(
+    #         X, return_probs=True, to_cpu=True
+    #     )
+    #     P = probs.numpy()  # (B, A)
+    #     mean_pi = P.mean(axis=0)
 
-        pi_entropy = float(-(mean_pi * np.log(np.clip(mean_pi, 1e-12, 1.0))).sum())
-        pi_neff = float(1.0 / np.sum(mean_pi * mean_pi))
+    #     pi_entropy = float(-(mean_pi * np.log(np.clip(mean_pi, 1e-12, 1.0))).sum())
+    #     pi_neff = float(1.0 / np.sum(mean_pi * mean_pi))
 
-        writer.add_scalar(f"{tls_id}/rollout/pi_entropy", pi_entropy, step)
-        writer.add_scalar(f"{tls_id}/rollout/pi_neff", pi_neff, step)
-        writer.add_scalar(f"{tls_id}/rollout/pi_min", float(mean_pi.min()), step)
-        writer.add_scalar(f"{tls_id}/rollout/pi_max", float(mean_pi.max()), step)
+    #     writer.add_scalar(f"{tls_id}/rollout/pi_entropy", pi_entropy, step)
+    #     writer.add_scalar(f"{tls_id}/rollout/pi_neff", pi_neff, step)
+    #     writer.add_scalar(f"{tls_id}/rollout/pi_min", float(mean_pi.min()), step)
+    #     writer.add_scalar(f"{tls_id}/rollout/pi_max", float(mean_pi.max()), step)
 
-        for a in range(int(action_dim)):
-            writer.add_scalar(f"{tls_id}/rollout/pi_mean/a{a}", float(mean_pi[a]), step)
+    #     for a in range(int(action_dim)):
+    #         writer.add_scalar(f"{tls_id}/rollout/pi_mean/a{a}", float(mean_pi[a]), step)
 
 
 # ---------------------------------------------------------------------------
@@ -320,6 +319,10 @@ def run_ppo_tsc(
     top2_w2: float,
     reward_clip_lo: float,
     reward_clip_hi: float,
+    # [NEW] potential-based shaping against major-phase starvation
+    w_starve_potential: float,
+    starve_softmax_beta: float,
+    starve_power: float,
     # PPO defaults (kept minimal)
     rollout_steps: int,
     ppo_epochs: int,
@@ -455,6 +458,17 @@ def run_ppo_tsc(
 
             ep_reward_sum = {tls_id: 0.0 for tls_id in tls_ids}
             ep_reward_n = {tls_id: 0 for tls_id in tls_ids}
+            # --- wait barrier logging (per-episode accumulators) ---
+            ep_waitbar_sum = {
+                tls_id: 0.0 for tls_id in tls_ids
+            }  # raw wait reward (<=0)
+            ep_waitbar_n = {tls_id: 0 for tls_id in tls_ids}
+            ep_waitbar_active = {
+                tls_id: 0 for tls_id in tls_ids
+            }  # count of steps where penalty fires
+            ep_waitbar_min = {
+                tls_id: 0.0 for tls_id in tls_ids
+            }  # most negative value in episode
 
             while True:
                 sim_t = float(traci.simulation.getTime())
@@ -488,6 +502,7 @@ def run_ppo_tsc(
                                 moving_speed_threshold=0.1,
                                 stopped_speed_threshold=0.1,
                                 cache=encoder_cache[tls_id],
+                                wait_ref_s=wait_ref_s,
                             ).astype(np.float32)
 
                             # OLD: only work with single scenario encoder
@@ -512,24 +527,14 @@ def run_ppo_tsc(
                             )
                             num_lanes = max(1, len(lane_ids))
 
-                            # r = reward_throughput_plus_softmax_queue(
-                            #     tls_id=tls_id,
-                            #     sim_time=sim_t,
-                            #     state_vec=terminal_state,
-                            #     cache=encoder_cache[tls_id],
-                            #     num_lanes=num_lanes,
-                            #     throughput_ref_veh_per_s=throughput_ref_veh_per_s,
-                            #     queue_ref_veh=queue_ref_veh,
-                            #     w_throughput=w_throughput,
-                            #     w_queue=w_queue,
-                            #     # top2_weights=(top2_w1, top2_w2),
-                            #     queue_power=queue_power,
-                            #     reward_clip=(reward_clip_lo, reward_clip_hi),
-                            # )
+                            dt_interval = sim_t - float(st.action_start_time)
+                            gamma_dt = float(gamma) ** (
+                                dt_interval / max(1e-6, float(action_hold_s))
+                            )
                             r = reward_throughput_plus_softmax_queue_deltaq_plus_softmax_wait_barrier_v2(
                                 tls_id=tls_id,
                                 sim_time=sim_t,
-                                state_vec=cur_state,
+                                state_vec=terminal_state,
                                 cache=encoder_cache[tls_id],
                                 num_lanes=num_lanes,
                                 throughput_ref_veh_per_s=throughput_ref_veh_per_s,
@@ -543,6 +548,11 @@ def run_ppo_tsc(
                                 w_queue=w_queue,
                                 w_delta_queue=w_delta_queue,
                                 w_wait_barrier=w_wait,
+                                # [NEW] starvation shaping
+                                w_starve_potential=w_starve_potential,
+                                starve_softmax_beta=starve_softmax_beta,
+                                starve_power=starve_power,
+                                gamma_dt=gamma_dt,
                                 # unchanged queue config
                                 queue_power=queue_power,
                                 softmax_queue_beta=softmax_queue_beta,
@@ -551,8 +561,6 @@ def run_ppo_tsc(
                             # [IMPORTANT] your v2 reward fn DOES NOT take reward_clip=...
                             # keep clipping outside (same behavior as before)
                             r = float(np.clip(r, reward_clip_lo, reward_clip_hi))
-
-                            dt_interval = sim_t - float(st.action_start_time)
                             buffers[tls_id].add(
                                 state=st.state,
                                 action=st.action,
@@ -652,6 +660,7 @@ def run_ppo_tsc(
                             moving_speed_threshold=0.1,
                             stopped_speed_threshold=0.1,
                             cache=encoder_cache[tls_id],
+                            wait_ref_s=wait_ref_s,
                         ).astype(np.float32)
 
                         # OLD: only work with single scenario encoder
@@ -684,20 +693,10 @@ def run_ppo_tsc(
                             and st.logp is not None
                             and st.value is not None
                         ):
-                            # r = reward_throughput_plus_softmax_queue(
-                            #     tls_id=tls_id,
-                            #     sim_time=sim_t,
-                            #     state_vec=cur_state,
-                            #     cache=encoder_cache[tls_id],
-                            #     num_lanes=num_lanes,
-                            #     throughput_ref_veh_per_s=throughput_ref_veh_per_s,
-                            #     queue_ref_veh=queue_ref_veh,
-                            #     w_throughput=w_throughput,
-                            #     w_queue=w_queue,
-                            #     # top2_weights=(top2_w1, top2_w2),
-                            #     queue_power=queue_power,
-                            #     reward_clip=(reward_clip_lo, reward_clip_hi),
-                            # )\
+                            dt_interval = sim_t - float(st.action_start_time)
+                            gamma_dt = float(gamma) ** (
+                                dt_interval / max(1e-6, float(action_hold_s))
+                            )
                             r = reward_throughput_plus_softmax_queue_deltaq_plus_softmax_wait_barrier_v2(
                                 tls_id=tls_id,
                                 sim_time=sim_t,
@@ -715,13 +714,15 @@ def run_ppo_tsc(
                                 w_queue=w_queue,
                                 w_delta_queue=w_delta_queue,
                                 w_wait_barrier=w_wait,
+                                # [NEW] starvation shaping
+                                w_starve_potential=w_starve_potential,
+                                starve_softmax_beta=starve_softmax_beta,
+                                starve_power=starve_power,
+                                gamma_dt=gamma_dt,
                                 # unchanged queue config
                                 queue_power=queue_power,
-                                softmax_queue_beta=5.0,  # keep default, or expose as arg if you want
+                                softmax_queue_beta=softmax_queue_beta,  # keep default, or expose as arg if you want
                             )
-                            dt_interval = sim_t - float(
-                                st.action_start_time
-                            )  # [NEW] real elapsed seconds for this transition
                             buffers[tls_id].add(
                                 state=st.state,
                                 action=st.action,
@@ -736,22 +737,28 @@ def run_ppo_tsc(
 
                             step = tb_step_decision[tls_id]
                             writer.add_scalar(f"{tls_id}/train/reward", float(r), step)
+                            # --- wait barrier term (raw <= 0) ---
+                            waitbar_raw = reward_softmax_wait_barrier_from_encoded_state(
+                                cur_state,  # IMPORTANT: use the same state_vec you used for reward
+                                num_lanes=num_lanes,
+                                wait_ref_s=wait_ref_s,
+                                softmax_beta=softmax_wait_beta,
+                                barrier_start_s=wait_barrier_start_s,
+                                barrier_power=1.0,  # match your reward config unless you exposed it
+                                wait_is_encoded=True,  # because encode_tsc_state_vector_bounded_v2 encodes wait
+                            )
+
+                            # episode aggregation
+                            wb = float(waitbar_raw)
+                            ep_waitbar_sum[tls_id] += wb
+                            ep_waitbar_n[tls_id] += 1
+                            if wb < 0.0:
+                                ep_waitbar_active[tls_id] += 1
+                                ep_waitbar_min[tls_id] = min(ep_waitbar_min[tls_id], wb)
+
+                            # per-decision scalars (optional but useful)
+                            writer.add_scalar(f"{tls_id}/train/waitbar_raw", wb, step)
                         else:
-                            # first controlled action: initialize throughput window (no-op reward)
-                            # _ = reward_throughput_plus_softmax_queue(
-                            #     tls_id=tls_id,
-                            #     sim_time=sim_t,
-                            #     state_vec=cur_state,
-                            #     cache=encoder_cache[tls_id],
-                            #     num_lanes=num_lanes,
-                            #     throughput_ref_veh_per_s=throughput_ref_veh_per_s,
-                            #     queue_ref_veh=queue_ref_veh,
-                            #     w_throughput=0.0,
-                            #     w_queue=0.0,
-                            #     # top2_weights=(top2_w1, top2_w2),
-                            #     queue_power=queue_power,
-                            #     reward_clip=(reward_clip_lo, reward_clip_hi),
-                            # )
                             _ = reward_throughput_plus_softmax_queue_deltaq_plus_softmax_wait_barrier_v2(
                                 tls_id=tls_id,
                                 sim_time=sim_t,
@@ -769,9 +776,14 @@ def run_ppo_tsc(
                                 w_queue=0.0,
                                 w_delta_queue=0.0,
                                 w_wait_barrier=0.0,
+                                # [NEW] init starvation cache too (still no-op because weights are 0)
+                                w_starve_potential=w_starve_potential,
+                                starve_softmax_beta=starve_softmax_beta,
+                                starve_power=starve_power,
+                                gamma_dt=1.0,
                                 # unchanged queue config
                                 queue_power=queue_power,
-                                softmax_queue_beta=5.0,
+                                softmax_queue_beta=softmax_queue_beta,
                             )
 
                         # NEW
@@ -886,6 +898,27 @@ def run_ppo_tsc(
                 writer.add_scalar(
                     f"{tls_id}/episode/reward_sum", float(ep_reward_sum[tls_id]), ep
                 )
+                # --- episode summary for wait barrier ---
+                wb_n = max(1, ep_waitbar_n[tls_id])
+                wb_mean_raw = ep_waitbar_sum[tls_id] / wb_n  # <= 0
+                wb_active_frac = ep_waitbar_active[tls_id] / wb_n
+
+                writer.add_scalar(
+                    f"{tls_id}/episode/waitbar_mean_raw", float(wb_mean_raw), ep
+                )
+                writer.add_scalar(
+                    f"{tls_id}/episode/waitbar_sum_raw",
+                    float(ep_waitbar_sum[tls_id]),
+                    ep,
+                )
+                writer.add_scalar(
+                    f"{tls_id}/episode/waitbar_active_frac", float(wb_active_frac), ep
+                )
+                writer.add_scalar(
+                    f"{tls_id}/episode/waitbar_min_raw",
+                    float(ep_waitbar_min[tls_id]),
+                    ep,
+                )
 
         finally:
             try:
@@ -942,6 +975,12 @@ def run_ppo_tsc(
             "traffic_scale_std": float(traffic_scale_std),
             "saved_unix_time": float(time.time()),
             "use_expert_features": bool(use_expert_features),
+            "weighted_reward_config": {
+                "w_throughput": float(w_throughput),
+                "w_queue": float(w_queue),
+                "w_delta_queue": float(w_delta_queue),
+                "w_wait": float(w_wait),
+            },
         }
 
         torch.save(
@@ -1014,6 +1053,10 @@ def main() -> None:
     ap.add_argument("--wait-barrier-start", type=float, default=30.0)
     ap.add_argument("--softmax-wait-beta", type=float, default=10.0)
     ap.add_argument("--softmax-queue-beta", type=float, default=4.0)
+    # [NEW] potential-based shaping against major-phase starvation
+    ap.add_argument("--w-starve-potential", type=float, default=0.0)
+    ap.add_argument("--starve-softmax-beta", type=float, default=10.0)
+    ap.add_argument("--starve-power", type=float, default=1.0)
     ap.add_argument("--queue-power", type=float, default=1.0)
     ap.add_argument("--top2-w1", type=float, default=0.7)
     ap.add_argument("--top2-w2", type=float, default=0.3)
@@ -1067,6 +1110,10 @@ def main() -> None:
         wait_barrier_start_s=float(args.wait_barrier_start),
         softmax_wait_beta=float(args.softmax_wait_beta),
         softmax_queue_beta=float(args.softmax_queue_beta),
+        # [NEW] starvation shaping args
+        w_starve_potential=float(args.w_starve_potential),
+        starve_softmax_beta=float(args.starve_softmax_beta),
+        starve_power=float(args.starve_power),
         queue_power=float(args.queue_power),
         top2_w1=float(args.top2_w1),
         top2_w2=float(args.top2_w2),

@@ -9,6 +9,24 @@ from dataclasses import dataclass
 from sumolib import checkBinary
 import libsumo as traci
 
+"""
+universal helpers
+"""
+
+
+def _soft_sat(x: float, *, sat: float = 1.0) -> float:
+    """Soft saturating map ~identity near 0, asymptote to `sat` for large x."""
+    x = float(x)
+    if x <= 0.0:
+        return 0.0
+    sat = max(1e-6, float(sat))
+    y = sat * (1.0 - float(np.exp(-x / sat)))
+    if y < 0.0:
+        y = 0.0
+    if y > sat:
+        y = sat
+    return float(y)
+
 
 """
 essential data structures 
@@ -566,14 +584,29 @@ def reward_softmax_wait_barrier_from_encoded_state(
     num_lanes: int,
     lane_block_size: int = 4,
     wait_offset_in_block: int = 3,  # [queue, veh_count, speed, waiting_time]
-    wait_ref_s: float = 60.0,  # normalize waits by this (seconds)
+    wait_ref_s: float = 60.0,
     softmax_beta: float = 10.0,
-    barrier_start_s: float = 30.0,  # no penalty until soft-wait exceeds this
+    barrier_start_s: float = 30.0,
     barrier_power: float = 1.0,
     clip_nonnegative: bool = True,
+    # [NEW] If True, state_vec already contains the bounded/normalized wait feature
+    # produced by encode_tsc_state_vector_bounded_v2 (soft-saturated to [0,1]).
+    wait_is_encoded: bool = False,
 ) -> float:
     """
     Smooth waiting-time barrier reward (negative).
+    Two input conventions:
+      A) wait_is_encoded == False:
+         - state_vec wait is in seconds (unbounded)
+         - normalize by wait_ref_s
+         - threshold is barrier_start_s / wait_ref_s
+
+      B) wait_is_encoded == True (encode_tsc_state_vector_bounded_v2):
+         - state_vec wait already is bounded/normalized to [0,1]:
+             w_enc = soft_sat(mean_wait_stopped / wait_ref_s, sat=1.0)
+         - DO NOT divide by wait_ref_s again
+         - map barrier_start_s into same encoded space:
+             start_enc = soft_sat(barrier_start_s / wait_ref_s, sat=1.0)
 
     Steps:
       1) Extract per-lane waiting times from encoded state
@@ -609,7 +642,11 @@ def reward_softmax_wait_barrier_from_encoded_state(
         w = float(state_vec[idx])
         if clip_nonnegative and w < 0.0:
             w = 0.0
-        waits.append(w * inv_ref)  # normalized wait
+        # waits.append(w * inv_ref)  # normalized wait
+        if wait_is_encoded:
+            waits.append(w)
+        else:
+            waits.append(w * inv_ref)
 
     waits = np.asarray(waits, dtype=np.float64)
 
@@ -623,13 +660,53 @@ def reward_softmax_wait_barrier_from_encoded_state(
     soft_wait = float(np.sum(weights * waits))
 
     # ---- barrier threshold in normalized units ----
-    start = float(barrier_start_s) * inv_ref
+    # start = float(barrier_start_s) * inv_ref
+    if wait_is_encoded:
+        start = _soft_sat(float(barrier_start_s) * inv_ref, sat=1.0)
+    else:
+        start = float(barrier_start_s) * inv_ref
     overflow = soft_wait - start
     if overflow <= 0.0:
         return 0.0
 
     penalty = overflow ** float(barrier_power)
     return -float(penalty)
+
+
+# =======================
+# [NEW] time-since-served starvation cost from encoded state (for potential shaping)
+# =======================
+def starvation_cost_from_encoded_state(
+    *,
+    tls_id: str,
+    state_vec: Sequence[float],
+    cache: Dict,
+    num_lanes: int,
+    lane_block_size: int = 4,
+    softmax_beta: float = 10.0,
+    power: float = 1.0,
+    min_major_green_s: float = 5.0,
+) -> float:
+    """
+    Extract the per-major "time-since-served" features appended by
+    encode_tsc_state_vector_bounded_v2() and convert them into a smooth
+    starvation cost in [0, 1] (approximately).
+    """
+    plan = get_tls_phase_plan(tls_id, cache, min_major_green_s=float(min_major_green_s))
+    num_phases = int(len(plan.phases))
+    num_major = int(len(plan.major_greens))
+    offset = int(num_lanes) * int(lane_block_size) + int(num_lanes) + int(num_phases)
+    end = offset + num_major
+    if len(state_vec) < end:
+        return 0.0
+    since = np.asarray(state_vec[offset:end], dtype=np.float64)
+    since = np.clip(since, 0.0, 1.0)
+    logits = float(softmax_beta) * since
+    logits = logits - float(np.max(logits))
+    exps = np.exp(logits)
+    weights = exps / float(np.sum(exps) + 1e-12)
+    cost = float(np.sum(weights * (since ** float(power))))
+    return float(np.clip(cost, 0.0, 1.0))
 
 
 def _get_tls_out_lanes(tls_id: str) -> list[str]:
@@ -802,12 +879,19 @@ def reward_throughput_plus_softmax_queue_deltaq_plus_softmax_wait_barrier_v2(
     w_queue: float = 1.0,
     w_delta_queue: float = 0.5,
     w_wait_barrier: float = 0.5,
+    # [NEW] potential-based shaping weight to prevent major-phase starvation
+    w_starve_potential: float = 0.0,
     # ---- queue term params ----
     queue_power: float = 1.0,
     softmax_queue_beta: float = 5.0,
     # ---- wait term params ----
     softmax_wait_beta: float = 10.0,
     wait_barrier_power: float = 1.0,
+    # ---- starvation potential params ----
+    starve_softmax_beta: float = 5.0,
+    starve_power: float = 1.0,
+    gamma_dt: float = 1.0,
+    min_major_green_s: float = 5.0,
     # ---- encoding layout ----
     lane_block_size: int = 4,
     queue_offset_in_block: int = 0,
@@ -870,7 +954,28 @@ def reward_throughput_plus_softmax_queue_deltaq_plus_softmax_wait_barrier_v2(
         barrier_start_s=wait_barrier_start_s,
         barrier_power=wait_barrier_power,
         clip_nonnegative=True,
+        wait_is_encoded=True,
     )
+    # 5) Potential-based starvation shaping (optional)
+    starve_shape = 0.0
+    if float(w_starve_potential) != 0.0:
+        cur_cost = starvation_cost_from_encoded_state(
+            tls_id=tls_id,
+            state_vec=state_vec,
+            cache=cache,
+            num_lanes=num_lanes,
+            lane_block_size=lane_block_size,
+            softmax_beta=float(starve_softmax_beta),
+            power=float(starve_power),
+            min_major_green_s=float(min_major_green_s),
+        )
+        prev_cost_key = f"_rw_prev_starve_cost::{tls_id}"
+        prev_cost = cache.get(prev_cost_key, None)
+        cache[prev_cost_key] = float(cur_cost)
+        if prev_cost is not None:
+            starve_shape = float(w_starve_potential) * (
+                float(prev_cost) - float(gamma_dt) * float(cur_cost)
+            )
 
     # Final combined reward (no clipping)
     r = (
@@ -878,8 +983,10 @@ def reward_throughput_plus_softmax_queue_deltaq_plus_softmax_wait_barrier_v2(
         + float(w_queue) * float(q_reward)
         + float(w_delta_queue) * float(delta_q)
         + float(w_wait_barrier) * float(wait_reward)
+        + float(starve_shape)
     )
     print(
         f">> reward: thr={thr:.3f} (norm {thr_norm:.3f}), q={q_reward:.3f}, delta_q={delta_q:.3f}, wait_barrier={wait_reward:.3f}"
+        f"{', starve_shape=' + format(starve_shape, '.3f') if starve_shape != 0.0 else ''}"
     )
     return float(r)

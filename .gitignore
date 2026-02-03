@@ -3,6 +3,7 @@
 /plots
 tensorboard_logs
 tsb_*
+models_*
 *.pyc
 dqn_tsc_models
 ppo_tsc_models
