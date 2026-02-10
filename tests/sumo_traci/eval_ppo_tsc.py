@@ -28,7 +28,6 @@ import libsumo as traci
 
 from ppo_agent import PPOAgent
 from scene_encoder import (
-    encode_tsc_state_vector_bounded,
     encode_tsc_state_vector_bounded_v2,
 )
 from expert_feature_extractor import tsc_isolated_intersection_feature_vector
@@ -63,13 +62,7 @@ def _encode_core(
             cache=cache,
         ).astype(np.float32)
 
-    # fallback: bounded (v1)
-    return encode_tsc_state_vector_bounded(
-        tls_id,
-        moving_speed_threshold=0.1,
-        stopped_speed_threshold=0.1,
-        cache=cache,
-    ).astype(np.float32)
+    raise ValueError(f"unknown encoder_name: {encoder_name}")
 
 
 def encode_state_for_policy(

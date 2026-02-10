@@ -1,13 +1,11 @@
 # launcher_run_ppo_tsc_gated.ps1
 
 $PythonExe  = "E:\anaconda3\envs\sumo\python.exe"
-$WorkDir    = "E:\repos\LLM_traffic_query\tests\sumo_traci"   # matches VS Code cwd
+$WorkDir    = "E:\repos\LLM_traffic_query\tests\sumo_traci"
 $ScriptPath = "E:\repos\LLM_traffic_query\tests\sumo_traci\run_ppo_tsc.py"
 
-# Match VS Code env
+# Match VS Code env/cwd
 $env:SUMO_HOME = "E:\Sumo"
-
-# Match VS Code cwd
 Set-Location $WorkDir
 
 $RunArgs = @(
@@ -17,7 +15,7 @@ $RunArgs = @(
   "--warmup", "100",
   "--episodes", "200",
   "--seed", "114",
-  "--sumo-seed", "514",
+  "--sumo-seed", "515",
   "--delay-ms", "0",
   "--hold", "5.0",
   "--device", "cuda",
@@ -27,11 +25,9 @@ $RunArgs = @(
   "--actor-lr", "0.00005",
   "--critic-lr", "0.0001",
   "--traffic-scale-mean", "01.0",
-  "--traffic-scale-std", "0.04",
-  # logdir and save dir suffix should be consistent with sumocfg name: tsb_... and models_...
-  # e.g., 4leg_3232skewed.sumocfg  -->  tsb_3232skewed  and  models_3232skewed
-  "--tb-logdir", "E:\repos\LLM_traffic_query\tests\sumo_traci\tsb_3LR23LR2\",
-  "--save-dir", "E:\repos\LLM_traffic_query\tests\sumo_traci\models_3LR23LR2\",
+  "--traffic-scale-std", "0.03",
+  "--tb-logdir", "E:\repos\LLM_traffic_query\tests\sumo_traci\tsb_3LR23LR2",
+  "--save-dir", "E:\repos\LLM_traffic_query\tests\sumo_traci\models_3LR23LR2",
   "--rollout-steps", "2048",
   "--ppo-epochs", "3",
   "--minibatch", "256",
@@ -49,10 +45,11 @@ $RunArgs = @(
   "--adv-clip", "3.0",
   "--thr-ref", "2.00",
   "--queue-ref", "1.0",
-  "--w-thr", "01.0",
-  "--w-queue", "01.0",
-  "--w-delta-queue", "03.0",
-  "--w-wait", "01.0",
+  "--w-thr", "00.90",
+  "--w-queue", "00.70",
+  "--w-delta-queue", "01.5",
+  "--w-wait", "01.3",
+  "--w-queue-zone", "00.5",
   "--wait-ref", "60",
   "--wait-barrier-start", "20",
   "--softmax-wait-beta", "5",
@@ -60,8 +57,8 @@ $RunArgs = @(
   "--queue-power", "1.0",
   "--reward-clip-lo", "-5.0",
   "--reward-clip-hi", "5.0",
-  "--log-tag", "highdq_514",
   "--use-expert-features",
+  "--log-tag", "exp1_1.0x_dl"
 )
 
 & $PythonExe $ScriptPath @RunArgs

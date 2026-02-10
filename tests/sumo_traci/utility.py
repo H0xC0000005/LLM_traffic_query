@@ -32,19 +32,104 @@ def _soft_sat(x: float, *, sat: float = 1.0) -> float:
 essential data structures 
 """
 
-# -------------------- Fixed-time baseline schedule --------------------
-# Proof-of-concept schedule: list of (phase_index, duration_seconds).
-#
-# IMPORTANT:
-#   - Phase indices must exist in your TLS program.
-#   - If your TLS has different phase ordering, update this list.
-#   - If a phase index is out of range, it will be wrapped modulo action_dim.
-FIXED_SCHEDULE: List[Tuple[int, float]] = [
-    (0, 40.0),
-    (1, 20.0),
-    (2, 40.0),
-    (3, 20.0),
-]
+
+class RunningFeatureStats:
+    def __init__(
+        self,
+        dim: int,
+        *,
+        eps: float = 1e-3,
+        reservoir_k: int = 2048,
+        bounded_01: bool = True,
+    ):
+        self.dim = int(dim)
+        self.eps = float(eps)
+        self.bounded_01 = bool(bounded_01)
+
+        self.n = 0
+        self.nan = np.zeros(self.dim, dtype=np.int64)
+        self.inf = np.zeros(self.dim, dtype=np.int64)
+
+        self.mean = np.zeros(self.dim, dtype=np.float64)
+        self.M2 = np.zeros(self.dim, dtype=np.float64)
+        self.minv = np.full(self.dim, np.inf, dtype=np.float64)
+        self.maxv = np.full(self.dim, -np.inf, dtype=np.float64)
+
+        self.frac_abs_lt_eps_cnt = np.zeros(self.dim, dtype=np.int64)
+        self.frac_lt_eps_cnt = np.zeros(self.dim, dtype=np.int64)
+        self.frac_gt_1m_eps_cnt = np.zeros(self.dim, dtype=np.int64)
+
+        # reservoir sampling (approx quantiles)
+        self.k = int(reservoir_k)
+        self.res = np.empty((self.k, self.dim), dtype=np.float32)
+        self.res_n = 0
+
+    def update(self, x: np.ndarray) -> None:
+        x = np.asarray(x, dtype=np.float32).reshape(-1)
+        if x.shape[0] != self.dim:
+            return  # or raise
+
+        self.n += 1
+
+        is_nan = np.isnan(x)
+        is_inf = np.isinf(x)
+        self.nan += is_nan.astype(np.int64)
+        self.inf += is_inf.astype(np.int64)
+
+        # ignore non-finite for numeric moments/min/max
+        xf = x.copy()
+        xf[~np.isfinite(xf)] = 0.0
+
+        # Welford
+        delta = xf - self.mean
+        self.mean += delta / self.n
+        delta2 = xf - self.mean
+        self.M2 += delta * delta2
+
+        self.minv = np.minimum(self.minv, xf)
+        self.maxv = np.maximum(self.maxv, xf)
+
+        self.frac_abs_lt_eps_cnt += (np.abs(xf) < self.eps).astype(np.int64)
+        if self.bounded_01:
+            self.frac_lt_eps_cnt += (xf < self.eps).astype(np.int64)
+            self.frac_gt_1m_eps_cnt += (xf > (1.0 - self.eps)).astype(np.int64)
+
+        # reservoir: keep first k, then replace uniformly
+        if self.res_n < self.k:
+            self.res[self.res_n, :] = xf
+            self.res_n += 1
+        else:
+            j = np.random.randint(0, self.n)
+            if j < self.k:
+                self.res[j, :] = xf
+
+    def finalize(self) -> dict:
+        n = max(1, int(self.n))
+        var = self.M2 / max(1, n - 1)
+        std = np.sqrt(np.maximum(var, 0.0))
+
+        out = {
+            "n": n,
+            "mean": self.mean.astype(np.float32),
+            "std": std.astype(np.float32),
+            "min": self.minv.astype(np.float32),
+            "max": self.maxv.astype(np.float32),
+            "nan": self.nan.astype(np.int64),
+            "inf": self.inf.astype(np.int64),
+            "frac_abs_lt_eps": (self.frac_abs_lt_eps_cnt / n).astype(np.float32),
+        }
+        if self.bounded_01:
+            out["frac_lt_eps"] = (self.frac_lt_eps_cnt / n).astype(np.float32)
+            out["frac_gt_1m_eps"] = (self.frac_gt_1m_eps_cnt / n).astype(np.float32)
+
+        if self.res_n > 0:
+            samp = self.res[: self.res_n]
+            out["p1"] = np.percentile(samp, 1, axis=0).astype(np.float32)
+            out["p5"] = np.percentile(samp, 5, axis=0).astype(np.float32)
+            out["p50"] = np.percentile(samp, 50, axis=0).astype(np.float32)
+            out["p95"] = np.percentile(samp, 95, axis=0).astype(np.float32)
+            out["p99"] = np.percentile(samp, 99, axis=0).astype(np.float32)
+        return out
 
 
 @dataclass
@@ -60,6 +145,439 @@ class TLSControllerState:
     )  # (phase_idx, duration_s)
     segment_end_time: float = 0.0  # when current segment ends
     # log_step: int = 0
+
+
+"""
+statistical structures and algorithms
+"""
+
+# ===========================
+# Proposal 1 / Proposal 2 wheels (algorithm only, no TensorBoard I/O)
+# ===========================
+
+
+def _np_or_none(x: Any) -> Optional[np.ndarray]:
+    if x is None:
+        return None
+    if isinstance(x, np.ndarray):
+        return x
+    try:
+        return np.asarray(x)
+    except Exception:
+        return None
+
+
+def get_attr_np(obj: Any, names: Sequence[str]) -> Optional[np.ndarray]:
+    for n in names:
+        if hasattr(obj, n):
+            arr = _np_or_none(getattr(obj, n))
+            if arr is not None:
+                return arr
+    return None
+
+
+def split_core_sem_from_states(
+    states: np.ndarray, sem_dim: int
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Split combined state [core, expert] -> (core, expert).
+    Returns empty arrays if shape is invalid.
+    """
+    x = np.asarray(states, dtype=np.float64)
+    if x.ndim != 2:
+        return np.empty((0, 0), dtype=np.float64), np.empty((0, 0), dtype=np.float64)
+
+    d = int(x.shape[1])
+    sem_dim = int(sem_dim)
+    if sem_dim <= 0 or sem_dim >= d:
+        return np.empty((0, 0), dtype=np.float64), np.empty((0, 0), dtype=np.float64)
+
+    core = x[:, : d - sem_dim]
+    sem = x[:, d - sem_dim :]
+    return core, sem
+
+
+def _safe_pearson_from_sums(
+    n: np.ndarray,
+    sum_x: np.ndarray,
+    sum_x2: np.ndarray,
+    sum_y: np.ndarray,
+    sum_y2: np.ndarray,
+    sum_xy: np.ndarray,
+    eps: float = 1e-12,
+) -> np.ndarray:
+    n = np.asarray(n, dtype=np.float64)
+    sum_x = np.asarray(sum_x, dtype=np.float64)
+    sum_x2 = np.asarray(sum_x2, dtype=np.float64)
+    sum_y = np.asarray(sum_y, dtype=np.float64)
+    sum_y2 = np.asarray(sum_y2, dtype=np.float64)
+    sum_xy = np.asarray(sum_xy, dtype=np.float64)
+
+    n_safe = np.maximum(n, 1.0)
+    num = sum_xy - (sum_x * sum_y) / n_safe
+    den_x = sum_x2 - (sum_x * sum_x) / n_safe
+    den_y = sum_y2 - (sum_y * sum_y) / n_safe
+    den = np.sqrt(np.maximum(den_x, 0.0) * np.maximum(den_y, 0.0))
+
+    r = np.full_like(num, np.nan, dtype=np.float64)
+    valid = (n >= 2.0) & (den > float(eps))
+    r[valid] = num[valid] / den[valid]
+    return np.clip(r, -1.0, 1.0)
+
+
+def _pearson_per_dim(x: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Pearson corr for each column of x against scalar target y.
+    Returns (corr[D], n_valid[D]).
+    """
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64).reshape(-1)
+
+    if x.ndim != 2:
+        return np.array([], dtype=np.float64), np.array([], dtype=np.int64)
+
+    n_rows = min(x.shape[0], y.shape[0])
+    if n_rows <= 0:
+        d = x.shape[1]
+        return np.full((d,), np.nan, dtype=np.float64), np.zeros((d,), dtype=np.int64)
+
+    x = x[:n_rows, :]
+    y = y[:n_rows]
+    y_fin = np.isfinite(y)
+
+    d = x.shape[1]
+    n = np.zeros(d, dtype=np.int64)
+    sum_x = np.zeros(d, dtype=np.float64)
+    sum_x2 = np.zeros(d, dtype=np.float64)
+    sum_y = np.zeros(d, dtype=np.float64)
+    sum_y2 = np.zeros(d, dtype=np.float64)
+    sum_xy = np.zeros(d, dtype=np.float64)
+
+    for j in range(d):
+        xj = x[:, j]
+        m = y_fin & np.isfinite(xj)
+        if not np.any(m):
+            continue
+        xv = xj[m]
+        yv = y[m]
+        n[j] = int(m.sum())
+        sum_x[j] = float(np.sum(xv))
+        sum_x2[j] = float(np.sum(xv * xv))
+        sum_y[j] = float(np.sum(yv))
+        sum_y2[j] = float(np.sum(yv * yv))
+        sum_xy[j] = float(np.sum(xv * yv))
+
+    r = _safe_pearson_from_sums(n, sum_x, sum_x2, sum_y, sum_y2, sum_xy)
+    return r, n
+
+
+def _corr_matrix(x: np.ndarray, y: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    """
+    Cross-correlation matrix corr(x[:,i], y[:,j]) with row-wise finite mask.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+
+    if x.ndim != 2 or y.ndim != 2:
+        return np.empty((0, 0), dtype=np.float64)
+
+    n_rows = min(x.shape[0], y.shape[0])
+    x = x[:n_rows, :]
+    y = y[:n_rows, :]
+
+    if n_rows <= 1 or x.shape[1] == 0 or y.shape[1] == 0:
+        return np.full((x.shape[1], y.shape[1]), np.nan, dtype=np.float64)
+
+    m = np.isfinite(x).all(axis=1) & np.isfinite(y).all(axis=1)
+    if int(m.sum()) <= 1:
+        return np.full((x.shape[1], y.shape[1]), np.nan, dtype=np.float64)
+
+    xf = x[m, :]
+    yf = y[m, :]
+    n = float(xf.shape[0])
+
+    xc = xf - np.mean(xf, axis=0, keepdims=True)
+    yc = yf - np.mean(yf, axis=0, keepdims=True)
+
+    cov = (xc.T @ yc) / max(1.0, n - 1.0)
+    sx = np.sqrt(np.maximum(np.var(xf, axis=0, ddof=1), 0.0))
+    sy = np.sqrt(np.maximum(np.var(yf, axis=0, ddof=1), 0.0))
+    den = sx[:, None] * sy[None, :]
+
+    out = np.full_like(cov, np.nan, dtype=np.float64)
+    valid = den > float(eps)
+    out[valid] = cov[valid] / den[valid]
+    return np.clip(out, -1.0, 1.0)
+
+
+class RunningExpertAdvPearson:
+    """
+    Proposal 1 tracker:
+      Pearson corr of each expert feature dim vs PPO advantage.
+    """
+
+    def __init__(self, sem_dim: int) -> None:
+        self.sem_dim = int(sem_dim)
+        self.n = np.zeros(self.sem_dim, dtype=np.int64)
+        self.sum_x = np.zeros(self.sem_dim, dtype=np.float64)
+        self.sum_x2 = np.zeros(self.sem_dim, dtype=np.float64)
+        self.sum_y = np.zeros(self.sem_dim, dtype=np.float64)
+        self.sum_y2 = np.zeros(self.sem_dim, dtype=np.float64)
+        self.sum_xy = np.zeros(self.sem_dim, dtype=np.float64)
+
+    def update(self, sem: np.ndarray, adv: np.ndarray) -> None:
+        sem = np.asarray(sem, dtype=np.float64)
+        adv = np.asarray(adv, dtype=np.float64).reshape(-1)
+
+        if sem.ndim != 2 or sem.shape[1] != self.sem_dim:
+            return
+
+        n_rows = min(sem.shape[0], adv.shape[0])
+        if n_rows <= 0:
+            return
+
+        sem = sem[:n_rows, :]
+        adv = adv[:n_rows]
+        adv_fin = np.isfinite(adv)
+
+        for j in range(self.sem_dim):
+            xj = sem[:, j]
+            m = adv_fin & np.isfinite(xj)
+            if not np.any(m):
+                continue
+            xv = xj[m]
+            yv = adv[m]
+            self.n[j] += int(m.sum())
+            self.sum_x[j] += float(np.sum(xv))
+            self.sum_x2[j] += float(np.sum(xv * xv))
+            self.sum_y[j] += float(np.sum(yv))
+            self.sum_y2[j] += float(np.sum(yv * yv))
+            self.sum_xy[j] += float(np.sum(xv * yv))
+
+    def corr(self) -> np.ndarray:
+        return _safe_pearson_from_sums(
+            self.n, self.sum_x, self.sum_x2, self.sum_y, self.sum_y2, self.sum_xy
+        )
+
+    def finalize(self) -> Dict[str, Any]:
+        r = self.corr()
+        finite = np.isfinite(r)
+        abs_r = np.abs(r[finite]) if np.any(finite) else np.array([], dtype=np.float64)
+        return {
+            "corr": r.astype(np.float32),
+            "n": self.n.astype(np.int64),
+            "mean_abs": float(np.mean(abs_r)) if abs_r.size else float("nan"),
+            "max_abs": float(np.max(abs_r)) if abs_r.size else float("nan"),
+            "frac_abs_gt_0p10": (
+                float(np.mean(abs_r > 0.10)) if abs_r.size else float("nan")
+            ),
+        }
+
+
+class RunningExpertCoreCrossCorr:
+    """
+    Proposal 2 tracker:
+      Cross-correlation matrix between expert dims and core encoder dims.
+    """
+
+    def __init__(self, sem_dim: int, core_dim: int) -> None:
+        self.sem_dim = int(sem_dim)
+        self.core_dim = int(core_dim)
+
+        self.n = 0
+        self.sum_sem = np.zeros(self.sem_dim, dtype=np.float64)
+        self.sum_sem2 = np.zeros(self.sem_dim, dtype=np.float64)
+        self.sum_core = np.zeros(self.core_dim, dtype=np.float64)
+        self.sum_core2 = np.zeros(self.core_dim, dtype=np.float64)
+        self.sum_outer = np.zeros((self.sem_dim, self.core_dim), dtype=np.float64)
+
+    def update(self, sem: np.ndarray, core: np.ndarray) -> None:
+        sem = np.asarray(sem, dtype=np.float64)
+        core = np.asarray(core, dtype=np.float64)
+
+        if sem.ndim != 2 or core.ndim != 2:
+            return
+        if sem.shape[1] != self.sem_dim or core.shape[1] != self.core_dim:
+            return
+
+        n_rows = min(sem.shape[0], core.shape[0])
+        if n_rows <= 0:
+            return
+
+        sem = sem[:n_rows, :]
+        core = core[:n_rows, :]
+
+        m = np.isfinite(sem).all(axis=1) & np.isfinite(core).all(axis=1)
+        if not np.any(m):
+            return
+
+        s = sem[m, :]
+        c = core[m, :]
+        self.n += int(s.shape[0])
+
+        self.sum_sem += np.sum(s, axis=0)
+        self.sum_sem2 += np.sum(s * s, axis=0)
+        self.sum_core += np.sum(c, axis=0)
+        self.sum_core2 += np.sum(c * c, axis=0)
+        self.sum_outer += s.T @ c
+
+    def corr(self) -> np.ndarray:
+        if self.n <= 1 or self.sem_dim <= 0 or self.core_dim <= 0:
+            return np.full((self.sem_dim, self.core_dim), np.nan, dtype=np.float64)
+
+        n = float(self.n)
+        mu_s = self.sum_sem / n
+        mu_c = self.sum_core / n
+
+        cov = (self.sum_outer / n) - (mu_s[:, None] * mu_c[None, :])
+        var_s = np.maximum((self.sum_sem2 / n) - (mu_s * mu_s), 0.0)
+        var_c = np.maximum((self.sum_core2 / n) - (mu_c * mu_c), 0.0)
+        den = np.sqrt(var_s)[:, None] * np.sqrt(var_c)[None, :]
+
+        out = np.full_like(cov, np.nan, dtype=np.float64)
+        valid = den > 1e-12
+        out[valid] = cov[valid] / den[valid]
+        return np.clip(out, -1.0, 1.0)
+
+    def finalize(self) -> Dict[str, Any]:
+        c = self.corr()
+        finite = np.isfinite(c)
+        abs_c = np.abs(c[finite]) if np.any(finite) else np.array([], dtype=np.float64)
+        sem_max = (
+            np.nanmax(np.abs(c), axis=1)
+            if (c.ndim == 2 and c.shape[1] > 0)
+            else np.array([], dtype=np.float64)
+        )
+        return {
+            "corr": c.astype(np.float32),
+            "n": int(self.n),
+            "mean_abs": float(np.mean(abs_c)) if abs_c.size else float("nan"),
+            "p95_abs": (
+                float(np.percentile(abs_c, 95.0)) if abs_c.size else float("nan")
+            ),
+            "frac_abs_gt_0p30": (
+                float(np.mean(abs_c > 0.30)) if abs_c.size else float("nan")
+            ),
+            "sem_max_abs_mean": (
+                float(np.nanmean(sem_max)) if sem_max.size else float("nan")
+            ),
+        }
+
+
+def proposal1_expert_adv_corr_from_rollout(
+    buf: Any,
+    sem_dim: int,
+    tracker: Optional[RunningExpertAdvPearson] = None,
+) -> Dict[str, Any]:
+    """
+    Proposal 1 one-rollout algorithm.
+    Uses state suffix as expert slice and correlates with advantages.
+    """
+    states = get_attr_np(buf, ["states", "obs", "observations"])
+    advs = get_attr_np(buf, ["advs", "advantages", "adv"])
+    if states is None or advs is None:
+        return {"ok": False, "reason": "missing_states_or_advs"}
+
+    core, sem = split_core_sem_from_states(states, sem_dim)
+    if sem.size == 0:
+        return {"ok": False, "reason": "invalid_sem_dim_or_state_shape"}
+
+    y = np.asarray(advs, dtype=np.float64).reshape(-1)
+    n_rows = min(sem.shape[0], y.shape[0])
+    if n_rows <= 1:
+        return {"ok": False, "reason": "too_few_samples"}
+
+    sem = sem[:n_rows, :]
+    y = y[:n_rows]
+
+    r, n = _pearson_per_dim(sem, y)
+    if tracker is not None:
+        tracker.update(sem, y)
+
+    finite = np.isfinite(r)
+    abs_r = np.abs(r[finite]) if np.any(finite) else np.array([], dtype=np.float64)
+    return {
+        "ok": True,
+        "corr": r.astype(np.float32),
+        "n": n.astype(np.int64),
+        "mean_abs": float(np.mean(abs_r)) if abs_r.size else float("nan"),
+        "max_abs": float(np.max(abs_r)) if abs_r.size else float("nan"),
+        "frac_abs_gt_0p10": (
+            float(np.mean(abs_r > 0.10)) if abs_r.size else float("nan")
+        ),
+    }
+
+
+def proposal2_expert_core_xcorr_from_rollout(
+    buf: Any,
+    sem_dim: int,
+    tracker: Optional[RunningExpertCoreCrossCorr] = None,
+) -> Dict[str, Any]:
+    """
+    Proposal 2 one-rollout algorithm.
+    Computes cross-correlation matrix between expert slice and core slice.
+    """
+    states = get_attr_np(buf, ["states", "obs", "observations"])
+    if states is None:
+        return {"ok": False, "reason": "missing_states"}
+
+    core, sem = split_core_sem_from_states(states, sem_dim)
+    if sem.size == 0:
+        return {"ok": False, "reason": "invalid_sem_dim_or_state_shape"}
+    if core.shape[1] == 0:
+        return {"ok": False, "reason": "no_core_dims"}
+
+    c = _corr_matrix(sem, core)
+    if tracker is not None:
+        tracker.update(sem, core)
+
+    finite = np.isfinite(c)
+    abs_c = np.abs(c[finite]) if np.any(finite) else np.array([], dtype=np.float64)
+    sem_max = (
+        np.nanmax(np.abs(c), axis=1)
+        if c.shape[1] > 0
+        else np.array([], dtype=np.float64)
+    )
+
+    return {
+        "ok": True,
+        "corr": c.astype(np.float32),
+        "mean_abs": float(np.mean(abs_c)) if abs_c.size else float("nan"),
+        "p95_abs": float(np.percentile(abs_c, 95.0)) if abs_c.size else float("nan"),
+        "frac_abs_gt_0p30": (
+            float(np.mean(abs_c > 0.30)) if abs_c.size else float("nan")
+        ),
+        "sem_max_abs_mean": (
+            float(np.nanmean(sem_max)) if sem_max.size else float("nan")
+        ),
+    }
+
+
+def proposal2_topk_abs_pairs(
+    corr: np.ndarray, k: int = 20
+) -> List[Tuple[int, int, float]]:
+    c = np.asarray(corr, dtype=np.float64)
+    if c.ndim != 2 or c.size == 0:
+        return []
+
+    abs_c = np.abs(c)
+    abs_c[~np.isfinite(abs_c)] = -np.inf
+    flat = abs_c.reshape(-1)
+
+    k = max(0, min(int(k), flat.size))
+    if k == 0:
+        return []
+
+    idx = np.argpartition(flat, -k)[-k:]
+    idx = idx[np.argsort(flat[idx])[::-1]]
+
+    out: List[Tuple[int, int, float]] = []
+    ncol = c.shape[1]
+    for f in idx:
+        i = int(f // ncol)
+        j = int(f % ncol)
+        out.append((i, j, float(c[i, j])))
+    return out
 
 
 """
@@ -402,6 +920,49 @@ def get_phase_count(tls_id: str) -> int:
 """
 various reward functions
 """
+
+
+def zone_exceedance_ratio_from_encoded_state(
+    state_vec,
+    num_lanes,
+    lane_block_size=4,
+    queue_offset_in_block=0,
+    q0=0.25,
+    tau=0.07,
+):
+    # q_i are already normalized queue features in [0,1] from your encoder
+    qs = []
+    base = 0
+    for _ in range(num_lanes):
+        q = float(state_vec[base + queue_offset_in_block])
+        qs.append(np.clip(q, 0.0, 1.0))
+        base += lane_block_size
+    qv = np.asarray(qs, dtype=np.float64)
+
+    # soft exceedance per lane
+    ei = 1.0 / (1.0 + np.exp(-(qv - q0) / max(1e-6, tau)))
+    z = float(np.mean(ei))  # in [0,1]
+    return z
+
+
+def zone_deadband_reward(
+    z,
+    z_lo=0.15,
+    z_hi=0.45,
+    r_good=0.10,
+    m1=0.05,
+    m2=0.05,
+    lam=0.6,
+    p=2.0,
+):
+    z = float(np.clip(z, 0.0, 1.0))
+    if z <= z_lo:
+        return float(r_good - m1 * (z / max(1e-6, z_lo)))
+    elif z <= z_hi:
+        return float(-m2 * ((z - z_lo) / max(1e-6, z_hi - z_lo)))
+    else:
+        x = (z - z_hi) / max(1e-6, 1.0 - z_hi)
+        return float(-lam * (x**p))
 
 
 def reward_avg_queue_from_encoded_state(
@@ -863,6 +1424,9 @@ def reward_throughput_plus_softmax_queue(
 # =======================
 # [NEW] composite reward: throughput + softmax queue + delta softmax queue + softmax wait barrier
 # =======================
+rcnt = 0
+
+
 def reward_throughput_plus_softmax_queue_deltaq_plus_softmax_wait_barrier_v2(
     *,
     tls_id: str,
@@ -879,8 +1443,8 @@ def reward_throughput_plus_softmax_queue_deltaq_plus_softmax_wait_barrier_v2(
     w_queue: float = 1.0,
     w_delta_queue: float = 0.5,
     w_wait_barrier: float = 0.5,
-    # [NEW] potential-based shaping weight to prevent major-phase starvation
     w_starve_potential: float = 0.0,
+    w_queue_zone: float = 0.3,
     # ---- queue term params ----
     queue_power: float = 1.0,
     softmax_queue_beta: float = 5.0,
@@ -892,11 +1456,22 @@ def reward_throughput_plus_softmax_queue_deltaq_plus_softmax_wait_barrier_v2(
     starve_power: float = 1.0,
     gamma_dt: float = 1.0,
     min_major_green_s: float = 5.0,
+    # ---- zone shaping params (hardcoded defaults; no run_ppo changes needed) ----
+    zone_q0: float = 0.29,  # lane queue exceedance center
+    zone_tau: float = 0.07,  # softness of exceedance sigmoid
+    zone_lo: float = 0.15,  # good coverage boundary
+    zone_hi: float = 0.45,  # bad coverage starts
+    zone_r_good: float = 0.15,  # reward when clearly in good region
+    zone_m1: float = 0.05,  # mild slope in good region
+    zone_m2: float = 0.1,  # mild slope in middle region
+    zone_lambda: float = 0.6,  # penalty scale in bad region
+    zone_p: float = 2.0,  # curvature in bad region
     # ---- encoding layout ----
     lane_block_size: int = 4,
     queue_offset_in_block: int = 0,
     wait_offset_in_block: int = 3,
 ) -> float:
+    global rcnt
     """
     Reward terms:
       1) Throughput term (normalized by throughput_ref_veh_per_s, NO CLIP)
@@ -977,6 +1552,29 @@ def reward_throughput_plus_softmax_queue_deltaq_plus_softmax_wait_barrier_v2(
                 float(prev_cost) - float(gamma_dt) * float(cur_cost)
             )
 
+    # 6) [NEW] queue coverage zone term (deadband/acceptable-region shaping)
+    # Requires you already pasted:
+    #   - zone_exceedance_ratio_from_encoded_state(...)
+    #   - zone_deadband_reward(...)
+    z_cov = zone_exceedance_ratio_from_encoded_state(
+        state_vec,
+        num_lanes=num_lanes,
+        lane_block_size=lane_block_size,
+        queue_offset_in_block=queue_offset_in_block,
+        q0=zone_q0,
+        tau=zone_tau,
+    )
+    r_zone = zone_deadband_reward(
+        z_cov,
+        z_lo=zone_lo,
+        z_hi=zone_hi,
+        r_good=zone_r_good,
+        m1=zone_m1,
+        m2=zone_m2,
+        lam=zone_lambda,
+        p=zone_p,
+    )
+
     # Final combined reward (no clipping)
     r = (
         float(w_throughput) * float(thr_norm)
@@ -984,9 +1582,12 @@ def reward_throughput_plus_softmax_queue_deltaq_plus_softmax_wait_barrier_v2(
         + float(w_delta_queue) * float(delta_q)
         + float(w_wait_barrier) * float(wait_reward)
         + float(starve_shape)
+        + float(w_queue_zone) * float(r_zone)
     )
-    print(
-        f">> reward: thr={thr:.3f} (norm {thr_norm:.3f}), q={q_reward:.3f}, delta_q={delta_q:.3f}, wait_barrier={wait_reward:.3f}"
-        f"{', starve_shape=' + format(starve_shape, '.3f') if starve_shape != 0.0 else ''}"
-    )
+    if rcnt % 100 == 0:
+        print(
+            f">> reward: {r} thr={thr:.3f} (norm {thr_norm:.3f}), q={q_reward:.3f}, delta_q={delta_q:.3f}, wait_barrier={wait_reward:.3f}, zone={r_zone:.3f}"
+            f"{', starve_shape=' + format(starve_shape, '.3f') if starve_shape != 0.0 else ''}"
+        )
+    rcnt += 1
     return float(r)

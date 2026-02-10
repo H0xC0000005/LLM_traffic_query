@@ -24,6 +24,11 @@ from sumolib import checkBinary
 from torch.utils.tensorboard import SummaryWriter
 import torch  # imported after numpy (Windows OpenMP duplicate init mitigation)
 
+import matplotlib
+
+matplotlib.use("Agg")  # headless-safe for training machines
+import matplotlib.pyplot as plt
+
 from ppo_agent import PPOAgent, RolloutBuffer
 from utility import *
 from scene_encoder import (
@@ -51,7 +56,9 @@ def encode_tsc_state_vector_combined(
     sem_cache = cache.setdefault("_enc_sem", {})
 
     v_core = encode_tsc_state_vector_bounded_v2(tls_id, cache=core_cache, **kwargs)
-    v_sem = tsc_isolated_intersection_feature_vector(tls_id, cache=sem_cache)
+    # v_sem = tsc_isolated_intersection_feature_vector(tls_id, cache=sem_cache)
+    v_sem = tsc_isolated_intersection_feature_vector(tls_id)
+    sem_cache["_last_v_sem"] = v_sem  # <-- key line
 
     return np.concatenate(
         [
@@ -217,6 +224,189 @@ def tb_log_rollout_diagnostics(
 # ---------------------------------------------------------------------------
 
 
+# ===========================
+# Proposal 1 logging only
+# ===========================
+def tb_log_proposal1_expert_adv_corr_rollout(
+    writer: SummaryWriter,
+    tls_id: str,
+    step: int,
+    buf: RolloutBuffer,
+    sem_dim: int,
+    tracker: Optional[RunningExpertAdvPearson],
+) -> None:
+    rep = proposal1_expert_adv_corr_from_rollout(buf, sem_dim=sem_dim, tracker=tracker)
+    if not rep.get("ok", False):
+        return
+
+    writer.add_scalar(
+        f"{tls_id}/expert_quality/p1_adv_corr/mean_abs",
+        float(rep["mean_abs"]),
+        step,
+    )
+    writer.add_scalar(
+        f"{tls_id}/expert_quality/p1_adv_corr/max_abs",
+        float(rep["max_abs"]),
+        step,
+    )
+    writer.add_scalar(
+        f"{tls_id}/expert_quality/p1_adv_corr/frac_abs_gt_0p10",
+        float(rep["frac_abs_gt_0p10"]),
+        step,
+    )
+
+    corr = np.asarray(rep["corr"], dtype=np.float64)
+    finite = np.isfinite(corr)
+    if np.any(finite):
+        writer.add_histogram(
+            f"{tls_id}/expert_quality/p1_adv_corr/hist_abs",
+            np.abs(corr[finite]),
+            step,
+        )
+
+
+def tb_log_proposal1_expert_adv_corr_final(
+    writer: SummaryWriter,
+    tls_id: str,
+    step: int,
+    tracker: Optional[RunningExpertAdvPearson],
+) -> None:
+    if tracker is None:
+        return
+    rep = tracker.finalize()
+    corr = np.asarray(rep["corr"], dtype=np.float64)
+    n = np.asarray(rep["n"], dtype=np.int64)
+
+    writer.add_scalar(
+        f"{tls_id}/expert_quality_final/p1_adv_corr/mean_abs",
+        float(rep["mean_abs"]),
+        step,
+    )
+    writer.add_scalar(
+        f"{tls_id}/expert_quality_final/p1_adv_corr/max_abs",
+        float(rep["max_abs"]),
+        step,
+    )
+    writer.add_scalar(
+        f"{tls_id}/expert_quality_final/p1_adv_corr/frac_abs_gt_0p10",
+        float(rep["frac_abs_gt_0p10"]),
+        step,
+    )
+
+    finite = np.isfinite(corr)
+    if np.any(finite):
+        writer.add_histogram(
+            f"{tls_id}/expert_quality_final/p1_adv_corr/hist_abs",
+            np.abs(corr[finite]),
+            step,
+        )
+
+    lines = ["|expert_dim|corr_to_adv|n|", "|---:|---:|---:|"]
+    for i in range(corr.shape[0]):
+        c = float(corr[i]) if np.isfinite(corr[i]) else float("nan")
+        lines.append(f"|{i}|{c:.6f}|{int(n[i])}|")
+    writer.add_text(
+        f"{tls_id}/expert_quality_final/p1_adv_corr/report", "\n".join(lines), step
+    )
+
+
+# ===========================
+# Proposal 2 logging only
+# ===========================
+def tb_log_proposal2_expert_core_xcorr_rollout(
+    writer: SummaryWriter,
+    tls_id: str,
+    step: int,
+    buf: RolloutBuffer,
+    sem_dim: int,
+    tracker: Optional[RunningExpertCoreCrossCorr],
+) -> None:
+    rep = proposal2_expert_core_xcorr_from_rollout(
+        buf, sem_dim=sem_dim, tracker=tracker
+    )
+    if not rep.get("ok", False):
+        return
+
+    writer.add_scalar(
+        f"{tls_id}/expert_quality/p2_core_xcorr/mean_abs",
+        float(rep["mean_abs"]),
+        step,
+    )
+    writer.add_scalar(
+        f"{tls_id}/expert_quality/p2_core_xcorr/p95_abs",
+        float(rep["p95_abs"]),
+        step,
+    )
+    writer.add_scalar(
+        f"{tls_id}/expert_quality/p2_core_xcorr/frac_abs_gt_0p30",
+        float(rep["frac_abs_gt_0p30"]),
+        step,
+    )
+    writer.add_scalar(
+        f"{tls_id}/expert_quality/p2_core_xcorr/sem_max_abs_mean",
+        float(rep["sem_max_abs_mean"]),
+        step,
+    )
+
+    c = np.asarray(rep["corr"], dtype=np.float64)
+    finite = np.isfinite(c)
+    if np.any(finite):
+        writer.add_histogram(
+            f"{tls_id}/expert_quality/p2_core_xcorr/hist_abs",
+            np.abs(c[finite]),
+            step,
+        )
+
+
+def tb_log_proposal2_expert_core_xcorr_final(
+    writer: SummaryWriter,
+    tls_id: str,
+    step: int,
+    tracker: Optional[RunningExpertCoreCrossCorr],
+) -> None:
+    if tracker is None:
+        return
+    rep = tracker.finalize()
+    c = np.asarray(rep["corr"], dtype=np.float64)
+
+    writer.add_scalar(
+        f"{tls_id}/expert_quality_final/p2_core_xcorr/mean_abs",
+        float(rep["mean_abs"]),
+        step,
+    )
+    writer.add_scalar(
+        f"{tls_id}/expert_quality_final/p2_core_xcorr/p95_abs",
+        float(rep["p95_abs"]),
+        step,
+    )
+    writer.add_scalar(
+        f"{tls_id}/expert_quality_final/p2_core_xcorr/frac_abs_gt_0p30",
+        float(rep["frac_abs_gt_0p30"]),
+        step,
+    )
+    writer.add_scalar(
+        f"{tls_id}/expert_quality_final/p2_core_xcorr/sem_max_abs_mean",
+        float(rep["sem_max_abs_mean"]),
+        step,
+    )
+
+    finite = np.isfinite(c)
+    if np.any(finite):
+        writer.add_histogram(
+            f"{tls_id}/expert_quality_final/p2_core_xcorr/hist_abs",
+            np.abs(c[finite]),
+            step,
+        )
+
+    top_pairs = proposal2_topk_abs_pairs(c, k=20)
+    lines = ["|rank|expert_dim|core_dim|corr|abs_corr|", "|---:|---:|---:|---:|---:|"]
+    for rk, (i, j, v) in enumerate(top_pairs, start=1):
+        lines.append(f"|{rk}|{i}|{j}|{v:+.6f}|{abs(v):.6f}|")
+    writer.add_text(
+        f"{tls_id}/expert_quality_final/p2_core_xcorr/top_pairs", "\n".join(lines), step
+    )
+
+
 def start_sumo(
     sumocfg: str, *, gui: bool, delay_ms: int, sumo_seed: int, traffic_scale: float
 ) -> None:
@@ -279,6 +469,9 @@ class PendingDecision:
     segment_end_time: float = 0.0
 
 
+pcnt = 0
+
+
 def run_ppo_tsc(
     sumocfg: str,
     *,
@@ -310,6 +503,7 @@ def run_ppo_tsc(
     w_queue: float,
     w_delta_queue: float,
     w_wait: float,
+    w_queue_zone: float,
     wait_ref_s: float,
     wait_barrier_start_s: float,
     softmax_wait_beta: float,
@@ -346,6 +540,7 @@ def run_ppo_tsc(
     use_expert_features: bool = False,
     log_tag: str = "",
 ) -> None:
+    global pcnt
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -358,6 +553,13 @@ def run_ppo_tsc(
         encoder_fn = encode_tsc_state_vector_bounded_v2
         print("[run_ppo_tsc] Using core scenario encoder only.")
         time.sleep(3)  # allow user to see the print
+    expert_stats: dict[RunningFeatureStats] = {}  # tls_id -> RunningFeatureStats
+    expert_names = {}  # tls_id -> list[str] (optional)
+
+    # NEW: expert feature report specific trackers and dims
+    expert_sem_dim: Dict[str, int] = {}
+    expert_adv_corr_trackers: Dict[str, RunningExpertAdvPearson] = {}
+    expert_core_xcorr_trackers: Dict[str, RunningExpertCoreCrossCorr] = {}
 
     run_name = (
         f"sumo_ppo_seed{seed}_{(log_tag + '_' if log_tag else '')}{int(time.time())}"
@@ -417,10 +619,34 @@ def run_ppo_tsc(
                     ).astype(np.float32)
                     state_dim = int(s0.shape[0])
                     # action_dim = int(get_phase_count(tls_id))
+
                     # NEW (major greens only)
                     action_dim = int(
                         tls_major_action_dim(tls_id, encoder_cache[tls_id])
                     )
+                    if use_expert_features:
+                        v_sem0 = (
+                            encoder_cache[tls_id]
+                            .get("_enc_sem", {})
+                            .get("_last_v_sem", None)
+                        )
+                        if v_sem0 is not None and tls_id not in expert_stats:
+                            sem_dim = int(np.asarray(v_sem0).shape[0])
+                            expert_stats[tls_id] = RunningFeatureStats(
+                                sem_dim, eps=1e-3, reservoir_k=2048, bounded_01=True
+                            )
+
+                            # NEW: init proposal trackers
+                            expert_sem_dim[tls_id] = sem_dim
+                            core_dim = int(max(0, state_dim - sem_dim))
+                            expert_adv_corr_trackers[tls_id] = RunningExpertAdvPearson(
+                                sem_dim=sem_dim
+                            )
+                            expert_core_xcorr_trackers[tls_id] = (
+                                RunningExpertCoreCrossCorr(
+                                    sem_dim=sem_dim, core_dim=core_dim
+                                )
+                            )
 
                     agents[tls_id] = PPOAgent(
                         state_dim=state_dim,
@@ -458,6 +684,22 @@ def run_ppo_tsc(
 
             ep_reward_sum = {tls_id: 0.0 for tls_id in tls_ids}
             ep_reward_n = {tls_id: 0 for tls_id in tls_ids}
+            # --- [NEW] deadlock detector: early-stop episodes that become fully gridlocked ---
+            # Hardcoded thresholds; intended to catch "no movement for long time while queues are stopped".
+            deadlock_flag = False
+            deadlock_t = 0.0
+            deadlock_tls: Optional[str] = None
+            deadlock_reason: str = ""
+            deadlock_last_seen_n = {tls_id: 0 for tls_id in tls_ids}
+            # Start the "no-flow clock" from warmup to avoid false triggers before control starts.
+            deadlock_last_flow_t = {tls_id: float(warmup_s) for tls_id in tls_ids}
+            # Cache controlled lanes once (fallback if encoder lane_ids are missing).
+            deadlock_ctrl_lanes = {
+                tls_id: sorted(set(traci.trafficlight.getControlledLanes(tls_id)))
+                for tls_id in tls_ids
+            }
+            # ------------------------------------------------------------------------------
+
             # --- wait barrier logging (per-episode accumulators) ---
             ep_waitbar_sum = {
                 tls_id: 0.0 for tls_id in tls_ids
@@ -477,6 +719,9 @@ def run_ppo_tsc(
                 )
                 in_control = sim_t >= float(warmup_s)
 
+                # [NEW] deadlock can force an early episode termination
+                if deadlock_flag:
+                    done_episode = True
                 if done_episode:
                     # close last pending interval as terminal transition
                     if in_control:
@@ -548,6 +793,7 @@ def run_ppo_tsc(
                                 w_queue=w_queue,
                                 w_delta_queue=w_delta_queue,
                                 w_wait_barrier=w_wait,
+                                w_queue_zone=w_queue_zone,
                                 # [NEW] starvation shaping
                                 w_starve_potential=w_starve_potential,
                                 starve_softmax_beta=starve_softmax_beta,
@@ -591,7 +837,30 @@ def run_ppo_tsc(
                                     buf,
                                     agent=agents[tls_id],
                                     action_dim=agents[tls_id].action_dim,
-                                )  # [NEW]
+                                )
+                                if use_expert_features and tls_id in expert_sem_dim:
+                                    sem_dim = int(expert_sem_dim[tls_id])
+
+                                    # Proposal 1
+                                    tb_log_proposal1_expert_adv_corr_rollout(
+                                        writer=writer,
+                                        tls_id=tls_id,
+                                        step=step,
+                                        buf=buf,
+                                        sem_dim=sem_dim,
+                                        tracker=expert_adv_corr_trackers.get(tls_id),
+                                    )
+
+                                    # Proposal 2
+                                    tb_log_proposal2_expert_core_xcorr_rollout(
+                                        writer=writer,
+                                        tls_id=tls_id,
+                                        step=step,
+                                        buf=buf,
+                                        sem_dim=sem_dim,
+                                        tracker=expert_core_xcorr_trackers.get(tls_id),
+                                    )
+
                                 stats = agents[tls_id].update(buf)
                                 buf.clear()
 
@@ -663,19 +932,15 @@ def run_ppo_tsc(
                             wait_ref_s=wait_ref_s,
                         ).astype(np.float32)
 
-                        # OLD: only work with single scenario encoder
-                        # num_lanes = max(
-                        #     1, len(encoder_cache[tls_id].get("lane_ids", []))
-                        # )
-                        # NEW: combined encoder uses namespaced cache
-                        # num_lanes = max(
-                        #     1,
-                        #     len(
-                        #         encoder_cache[tls_id]
-                        #         .get("_enc_core", {})
-                        #         .get("lane_ids", [])
-                        #     ),
-                        # )
+                        if use_expert_features:
+                            v_sem = (
+                                encoder_cache[tls_id]
+                                .get("_enc_sem", {})
+                                .get("_last_v_sem", None)
+                            )
+                            if v_sem is not None:
+                                expert_stats[tls_id].update(v_sem)
+
                         lane_ids = (
                             encoder_cache[tls_id]
                             .get("_enc_core", {})
@@ -714,6 +979,7 @@ def run_ppo_tsc(
                                 w_queue=w_queue,
                                 w_delta_queue=w_delta_queue,
                                 w_wait_barrier=w_wait,
+                                w_queue_zone=w_queue_zone,
                                 # [NEW] starvation shaping
                                 w_starve_potential=w_starve_potential,
                                 starve_softmax_beta=starve_softmax_beta,
@@ -723,6 +989,7 @@ def run_ppo_tsc(
                                 queue_power=queue_power,
                                 softmax_queue_beta=softmax_queue_beta,  # keep default, or expose as arg if you want
                             )
+                            r = float(np.clip(r, reward_clip_lo, reward_clip_hi))
                             buffers[tls_id].add(
                                 state=st.state,
                                 action=st.action,
@@ -776,6 +1043,7 @@ def run_ppo_tsc(
                                 w_queue=0.0,
                                 w_delta_queue=0.0,
                                 w_wait_barrier=0.0,
+                                w_queue_zone=0.0,
                                 # [NEW] init starvation cache too (still no-op because weights are 0)
                                 w_starve_potential=w_starve_potential,
                                 starve_softmax_beta=starve_softmax_beta,
@@ -844,7 +1112,30 @@ def run_ppo_tsc(
                                 buf,
                                 agent=agents[tls_id],
                                 action_dim=agents[tls_id].action_dim,
-                            )  # [NEW]
+                            )
+                            if use_expert_features and tls_id in expert_sem_dim:
+                                sem_dim = int(expert_sem_dim[tls_id])
+
+                                # Proposal 1
+                                tb_log_proposal1_expert_adv_corr_rollout(
+                                    writer=writer,
+                                    tls_id=tls_id,
+                                    step=step,
+                                    buf=buf,
+                                    sem_dim=sem_dim,
+                                    tracker=expert_adv_corr_trackers.get(tls_id),
+                                )
+
+                                # Proposal 2
+                                tb_log_proposal2_expert_core_xcorr_rollout(
+                                    writer=writer,
+                                    tls_id=tls_id,
+                                    step=step,
+                                    buf=buf,
+                                    sem_dim=sem_dim,
+                                    tracker=expert_core_xcorr_trackers.get(tls_id),
+                                )
+
                             stats = agents[tls_id].update(buf)
                             buf.clear()
 
@@ -879,18 +1170,94 @@ def run_ppo_tsc(
                         tgt_major_idx = int(
                             target_major_phase
                         )  # SUMO phase index of the selected major green
-                        print(
-                            f"[ep={ep} t={sim_t:6.1f}] tls={tls_id} "
-                            f"a(major_idx)={int(a)} "
-                            f"cur_phase={cur_phase_idx} cur_major={cur_major_idx} "
-                            f"tgt_major={tgt_major_idx} "
-                            f"segments={[(p, round(d,1)) for (p,d) in segments]} "
-                            f"hold={action_hold_s}s"
-                        )
+
+                        if pcnt % 100 == 0:
+                            print(
+                                f"[ep={ep} t={sim_t:6.1f}] tls={tls_id} "
+                                f"a(major_idx)={int(a)} "
+                                f"cur_phase={cur_phase_idx} cur_major={cur_major_idx} "
+                                f"tgt_major={tgt_major_idx} "
+                                f"segments={[(p, round(d,1)) for (p,d) in segments]} "
+                                f"hold={action_hold_s}s"
+                            )
+                        pcnt += 1
 
                 traci.simulationStep()
+                sim_t_next = float(traci.simulation.getTime())
                 for tls_id in tls_ids:
                     throughput_tracker_step(tls_id, encoder_cache[tls_id])
+
+                # --- [NEW] deadlock detection (checked after stepping & throughput update) ---
+                # Detect: no new downstream entries for a long time + almost all vehicles stopped.
+                if (not deadlock_flag) and (sim_t_next >= float(warmup_s) + 120.0):
+                    if traci.simulation.getMinExpectedNumber() > 0:
+                        for tls_id in tls_ids:
+                            cache = encoder_cache[tls_id]
+
+                            # Flow proxy: total # unique vehicles that ever entered downstream lanes.
+                            seen_total = cache.get("_tp_seen_total", None)
+                            seen_n = (
+                                len(seen_total) if isinstance(seen_total, set) else 0
+                            )
+                            if seen_n > int(deadlock_last_seen_n[tls_id]):
+                                deadlock_last_seen_n[tls_id] = int(seen_n)
+                                deadlock_last_flow_t[tls_id] = float(sim_t_next)
+
+                            noflow_s = float(sim_t_next) - float(
+                                deadlock_last_flow_t[tls_id]
+                            )
+                            if noflow_s < 150.0:
+                                continue
+
+                            # Use encoder lane_ids when available; fall back to controlled lanes.
+                            lane_ids = (
+                                cache.get("_enc_core", {}).get("lane_ids", [])
+                                if use_expert_features
+                                else cache.get("lane_ids", [])
+                            )
+                            if not lane_ids:
+                                lane_ids = deadlock_ctrl_lanes.get(tls_id, [])
+                            # (lane_ids can contain duplicates depending on SUMO, make unique)
+                            lane_ids = list(dict.fromkeys(lane_ids))
+
+                            tot_veh = 0
+                            tot_halt = 0
+                            tot_speed = 0.0
+                            for ln in lane_ids:
+                                nveh = int(traci.lane.getLastStepVehicleNumber(ln))
+                                if nveh <= 0:
+                                    continue
+                                tot_veh += nveh
+                                tot_halt += int(traci.lane.getLastStepHaltingNumber(ln))
+                                vln = float(traci.lane.getLastStepMeanSpeed(ln))
+                                if vln > 0.0:
+                                    tot_speed += vln * float(nveh)
+
+                            if tot_veh < 8:
+                                continue
+
+                            mean_speed = tot_speed / max(1.0, float(tot_veh))
+                            stop_ratio = float(tot_halt) / max(1.0, float(tot_veh))
+
+                            # "Gridlock-like": almost everyone stopped + no flow for long time.
+                            if (stop_ratio >= 0.93) and (mean_speed <= 0.15):
+                                deadlock_flag = True
+                                deadlock_t = float(sim_t_next)
+                                deadlock_tls = str(tls_id)
+                                deadlock_reason = (
+                                    f"noflow_s={noflow_s:.1f} tot_veh={tot_veh} "
+                                    f"stop_ratio={stop_ratio:.2f} mean_speed={mean_speed:.2f}"
+                                )
+                                print(
+                                    f"[ep={ep}] DEADLOCK detected at t={deadlock_t:.1f} tls={deadlock_tls} "
+                                    f"({deadlock_reason}) -> early stop episode"
+                                )
+                                break
+
+                if deadlock_flag:
+                    # Jump to the episode-closing branch immediately (no extra simulationStep).
+                    continue
+                # ------------------------------------------------------------------------------
 
             for tls_id in tls_ids:
                 mean_r = ep_reward_sum[tls_id] / max(1, ep_reward_n[tls_id])
@@ -919,6 +1286,18 @@ def run_ppo_tsc(
                     float(ep_waitbar_min[tls_id]),
                     ep,
                 )
+                # deadlock episode flag
+                writer.add_scalar(
+                    f"{tls_id}/episode/deadlock",
+                    float(1.0 if deadlock_flag else 0.0),
+                    ep,
+                )
+                if deadlock_flag and (deadlock_tls is not None):
+                    writer.add_scalar(
+                        f"{tls_id}/episode/deadlock_is_owner",
+                        float(1.0 if str(deadlock_tls) == str(tls_id) else 0.0),
+                        ep,
+                    )
 
         finally:
             try:
@@ -930,6 +1309,63 @@ def run_ppo_tsc(
         total_elapsed += ep_elapsed
         writer.add_scalar("global/episode_wall_s", float(ep_elapsed), ep)
         writer.add_scalar("global/traffic_scale", float(traffic_scale_sampled), ep)
+        # --- [NEW] episode-level deadlock logging ---
+        writer.add_scalar("global/deadlock", float(1.0 if deadlock_flag else 0.0), ep)
+        if deadlock_flag:
+            writer.add_scalar("global/deadlock_time_s", float(deadlock_t), ep)
+        # -----------------------------------------------
+
+    for tls_id, st in expert_stats.items():
+        rep = st.finalize()
+        step = int(tb_step_decision.get(tls_id, 0))
+
+        # small set of scalars (avoid TB clutter)
+        writer.add_scalar(
+            f"{tls_id}/expert_features/mean_std", float(np.mean(rep["std"])), step
+        )
+        writer.add_scalar(
+            f"{tls_id}/expert_features/max_std", float(np.max(rep["std"])), step
+        )
+        writer.add_scalar(
+            f"{tls_id}/expert_features/mean_dead_frac",
+            float(np.mean(rep["frac_abs_lt_eps"])),
+            step,
+        )
+        writer.add_scalar(
+            f"{tls_id}/expert_features/max_dead_frac",
+            float(np.max(rep["frac_abs_lt_eps"])),
+            step,
+        )
+        writer.add_scalar(f"{tls_id}/expert_features/n_samples", float(rep["n"]), step)
+
+        # detailed per-dim report as text (markdown table)
+        lines = [
+            "|idx|mean|std|min|max|p5|p50|p95|dead_frac|nan|inf|",
+            "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+        for i in range(st.dim):
+            lines.append(
+                f"|{i}|{rep['mean'][i]:.4g}|{rep['std'][i]:.4g}|{rep['min'][i]:.4g}|{rep['max'][i]:.4g}"
+                f"|{rep.get('p5',[0]*st.dim)[i]:.4g}|{rep.get('p50',[0]*st.dim)[i]:.4g}|{rep.get('p95',[0]*st.dim)[i]:.4g}"
+                f"|{rep['frac_abs_lt_eps'][i]:.3f}|{int(rep['nan'][i])}|{int(rep['inf'][i])}|"
+            )
+        writer.add_text(f"{tls_id}/expert_features/report", "\n".join(lines), step)
+
+    # Final Proposal 1 report
+    tb_log_proposal1_expert_adv_corr_final(
+        writer=writer,
+        tls_id=tls_id,
+        step=step,
+        tracker=expert_adv_corr_trackers.get(tls_id),
+    )
+
+    # Final Proposal 2 report
+    tb_log_proposal2_expert_core_xcorr_final(
+        writer=writer,
+        tls_id=tls_id,
+        step=step,
+        tracker=expert_core_xcorr_trackers.get(tls_id),
+    )
 
     writer.flush()
     writer.close()
@@ -1050,6 +1486,7 @@ def main() -> None:
     ap.add_argument("--w-delta-queue", type=float, default=0.5)
     ap.add_argument("--w-wait", type=float, default=0.5)
     ap.add_argument("--wait-ref", type=float, default=60.0)
+    ap.add_argument("--w-queue-zone", type=float, default=0.3)
     ap.add_argument("--wait-barrier-start", type=float, default=30.0)
     ap.add_argument("--softmax-wait-beta", type=float, default=10.0)
     ap.add_argument("--softmax-queue-beta", type=float, default=4.0)
@@ -1106,6 +1543,7 @@ def main() -> None:
         w_queue=float(args.w_queue),
         w_delta_queue=float(args.w_delta_queue),
         w_wait=float(args.w_wait),
+        w_queue_zone=float(args.w_queue_zone),
         wait_ref_s=float(args.wait_ref),
         wait_barrier_start_s=float(args.wait_barrier_start),
         softmax_wait_beta=float(args.softmax_wait_beta),

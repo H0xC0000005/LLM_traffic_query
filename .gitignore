@@ -10,6 +10,7 @@ ppo_tsc_models
 ppo_tsc_models*
 eval_results
 expert_function_cache
+expert_feat_extractor_archive
 
 
 out.txt
