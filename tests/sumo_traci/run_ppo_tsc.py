@@ -36,6 +36,11 @@ from scene_encoder import (
 )
 from expert_feature_extractor import *
 
+"""
+constants
+"""
+HEATMAP_EVERY = 2000  # e.g., every 10 update points
+
 
 # run-specfic encoding function, combining expert features and original scene encoder
 def encode_tsc_state_vector_combined(
@@ -98,6 +103,99 @@ def _explained_variance(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     if var_y < 1e-12:
         return float("nan")
     return 1.0 - float(np.var(y_true - y_pred)) / var_y
+
+
+def _next_heatmap_event(
+    tls_id: str,
+    event_counter: Dict[str, int],
+    *,
+    every_updates: int,
+    log_first: bool = True,
+) -> Tuple[bool, int]:
+    """
+    Returns (should_log_now, update_event_idx).
+    update_event_idx increments ONLY when we are at a rollout-consume point.
+    """
+    idx = int(event_counter.get(tls_id, 0)) + 1
+    event_counter[tls_id] = idx
+
+    if log_first and idx == 1:
+        return True, idx
+    if every_updates <= 0:
+        return False, idx
+    return (idx % int(every_updates) == 0), idx
+
+
+def _tb_add_corr_heatmap(
+    writer: SummaryWriter,
+    tag: str,
+    mat: np.ndarray,
+    step: int,
+    *,
+    xlabel: str,
+    ylabel: str,
+    title: Optional[str] = None,
+    vmin: float = -1.0,
+    vmax: float = 1.0,
+) -> None:
+    """
+    Logging-only helper:
+      - mat can be 1D (will be shown as 1xD) or 2D
+      - assumes correlation-like values in [-1, 1]
+    """
+    a = np.asarray(mat, dtype=np.float32)
+    if a.ndim == 1:
+        a = a.reshape(1, -1)
+    if a.ndim != 2 or a.size == 0:
+        return
+    if not np.isfinite(a).any():
+        return
+
+    h, w = a.shape
+
+    # dynamic figure size: keep readable for ~100 dims
+    fig_w = float(np.clip(6.0 + w * 0.08, 6.0, 24.0))
+    fig_h = float(np.clip(2.5 + h * 0.08, 2.5, 18.0))
+
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h), constrained_layout=True)
+    im = ax.imshow(
+        a,
+        aspect="auto",
+        interpolation="nearest",
+        cmap="coolwarm",
+        vmin=vmin,
+        vmax=vmax,
+    )
+
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    if title:
+        ax.set_title(title)
+
+    # sparse ticks to avoid clutter for large dims
+    def _ticks(n: int, max_ticks: int = 30):
+        if n <= 0:
+            return np.array([], dtype=int)
+        if n <= max_ticks:
+            return np.arange(n, dtype=int)
+        stride = int(np.ceil(n / max_ticks))
+        return np.arange(0, n, stride, dtype=int)
+
+    xt = _ticks(w, max_ticks=40)
+    yt = _ticks(h, max_ticks=30)
+
+    ax.set_xticks(xt)
+    ax.set_yticks(yt)
+
+    # labels are actual indices
+    ax.set_xticklabels([str(int(i)) for i in xt], rotation=90, fontsize=7)
+    ax.set_yticklabels([str(int(i)) for i in yt], fontsize=7)
+
+    cbar = fig.colorbar(im, ax=ax, fraction=0.028, pad=0.02)
+    cbar.set_label("correlation", rotation=90)
+
+    writer.add_figure(tag, fig, global_step=step)
+    plt.close(fig)
 
 
 def tb_log_rollout_diagnostics(
@@ -234,20 +332,19 @@ def tb_log_proposal1_expert_adv_corr_rollout(
     buf: RolloutBuffer,
     sem_dim: int,
     tracker: Optional[RunningExpertAdvPearson],
+    *,
+    log_heatmap: bool = False,
+    heatmap_step: Optional[int] = None,  # NEW
 ) -> None:
     rep = proposal1_expert_adv_corr_from_rollout(buf, sem_dim=sem_dim, tracker=tracker)
     if not rep.get("ok", False):
         return
 
     writer.add_scalar(
-        f"{tls_id}/expert_quality/p1_adv_corr/mean_abs",
-        float(rep["mean_abs"]),
-        step,
+        f"{tls_id}/expert_quality/p1_adv_corr/mean_abs", float(rep["mean_abs"]), step
     )
     writer.add_scalar(
-        f"{tls_id}/expert_quality/p1_adv_corr/max_abs",
-        float(rep["max_abs"]),
-        step,
+        f"{tls_id}/expert_quality/p1_adv_corr/max_abs", float(rep["max_abs"]), step
     )
     writer.add_scalar(
         f"{tls_id}/expert_quality/p1_adv_corr/frac_abs_gt_0p10",
@@ -255,13 +352,23 @@ def tb_log_proposal1_expert_adv_corr_rollout(
         step,
     )
 
-    corr = np.asarray(rep["corr"], dtype=np.float64)
+    corr = np.asarray(rep["corr"], dtype=np.float32)
     finite = np.isfinite(corr)
     if np.any(finite):
         writer.add_histogram(
-            f"{tls_id}/expert_quality/p1_adv_corr/hist_abs",
-            np.abs(corr[finite]),
-            step,
+            f"{tls_id}/expert_quality/p1_adv_corr/hist_abs", np.abs(corr[finite]), step
+        )
+
+    # NEW: heatmap (1 x D)
+    if log_heatmap:
+        _tb_add_corr_heatmap(
+            writer=writer,
+            tag=f"{tls_id}/expert_quality/p1_adv_corr/heatmap",
+            mat=corr.reshape(1, -1),
+            step=(int(heatmap_step) if heatmap_step is not None else step),  # NEW,
+            xlabel="expert_dim",
+            ylabel="advantage",
+            title="corr(expert_dim, advantage)",
         )
 
 
@@ -274,7 +381,7 @@ def tb_log_proposal1_expert_adv_corr_final(
     if tracker is None:
         return
     rep = tracker.finalize()
-    corr = np.asarray(rep["corr"], dtype=np.float64)
+    corr = np.asarray(rep["corr"], dtype=np.float32)
     n = np.asarray(rep["n"], dtype=np.int64)
 
     writer.add_scalar(
@@ -301,6 +408,18 @@ def tb_log_proposal1_expert_adv_corr_final(
             step,
         )
 
+    # NEW: final heatmap
+    _tb_add_corr_heatmap(
+        writer=writer,
+        tag=f"{tls_id}/expert_quality_final/p1_adv_corr/heatmap",
+        mat=corr.reshape(1, -1),
+        step=step,
+        xlabel="expert_dim",
+        ylabel="advantage",
+        title="Proposal 1 FINAL: corr(expert_dim, advantage)",
+    )
+
+    # keep your text table too if useful
     lines = ["|expert_dim|corr_to_adv|n|", "|---:|---:|---:|"]
     for i in range(corr.shape[0]):
         c = float(corr[i]) if np.isfinite(corr[i]) else float("nan")
@@ -320,6 +439,9 @@ def tb_log_proposal2_expert_core_xcorr_rollout(
     buf: RolloutBuffer,
     sem_dim: int,
     tracker: Optional[RunningExpertCoreCrossCorr],
+    *,
+    log_heatmap: bool = False,
+    heatmap_step: Optional[int] = None,  # NEW
 ) -> None:
     rep = proposal2_expert_core_xcorr_from_rollout(
         buf, sem_dim=sem_dim, tracker=tracker
@@ -328,14 +450,10 @@ def tb_log_proposal2_expert_core_xcorr_rollout(
         return
 
     writer.add_scalar(
-        f"{tls_id}/expert_quality/p2_core_xcorr/mean_abs",
-        float(rep["mean_abs"]),
-        step,
+        f"{tls_id}/expert_quality/p2_core_xcorr/mean_abs", float(rep["mean_abs"]), step
     )
     writer.add_scalar(
-        f"{tls_id}/expert_quality/p2_core_xcorr/p95_abs",
-        float(rep["p95_abs"]),
-        step,
+        f"{tls_id}/expert_quality/p2_core_xcorr/p95_abs", float(rep["p95_abs"]), step
     )
     writer.add_scalar(
         f"{tls_id}/expert_quality/p2_core_xcorr/frac_abs_gt_0p30",
@@ -348,13 +466,23 @@ def tb_log_proposal2_expert_core_xcorr_rollout(
         step,
     )
 
-    c = np.asarray(rep["corr"], dtype=np.float64)
+    c = np.asarray(rep["corr"], dtype=np.float32)
     finite = np.isfinite(c)
     if np.any(finite):
         writer.add_histogram(
-            f"{tls_id}/expert_quality/p2_core_xcorr/hist_abs",
-            np.abs(c[finite]),
-            step,
+            f"{tls_id}/expert_quality/p2_core_xcorr/hist_abs", np.abs(c[finite]), step
+        )
+
+    # NEW: heatmap (D_sem x D_core)
+    if log_heatmap:
+        _tb_add_corr_heatmap(
+            writer=writer,
+            tag=f"{tls_id}/expert_quality/p2_core_xcorr/heatmap",
+            mat=c,
+            step=(int(heatmap_step) if heatmap_step is not None else step),
+            xlabel="core_dim",
+            ylabel="expert_dim",
+            title="corr(expert_dim, core_dim)",
         )
 
 
@@ -367,7 +495,7 @@ def tb_log_proposal2_expert_core_xcorr_final(
     if tracker is None:
         return
     rep = tracker.finalize()
-    c = np.asarray(rep["corr"], dtype=np.float64)
+    c = np.asarray(rep["corr"], dtype=np.float32)
 
     writer.add_scalar(
         f"{tls_id}/expert_quality_final/p2_core_xcorr/mean_abs",
@@ -398,6 +526,18 @@ def tb_log_proposal2_expert_core_xcorr_final(
             step,
         )
 
+    # NEW: final heatmap
+    _tb_add_corr_heatmap(
+        writer=writer,
+        tag=f"{tls_id}/expert_quality_final/p2_core_xcorr/heatmap",
+        mat=c,
+        step=step,
+        xlabel="core_dim",
+        ylabel="expert_dim",
+        title="Proposal 2 FINAL: corr(expert_dim, core_dim)",
+    )
+
+    # keep top-k text if wanted
     top_pairs = proposal2_topk_abs_pairs(c, k=20)
     lines = ["|rank|expert_dim|core_dim|corr|abs_corr|", "|---:|---:|---:|---:|---:|"]
     for rk, (i, j, v) in enumerate(top_pairs, start=1):
@@ -573,6 +713,9 @@ def run_ppo_tsc(
 
     tb_step_decision = {}  # per TLS decision counter
     kl_early_stop_cum = {}
+    expert_heatmap_event_idx: Dict[str, int] = {}
+    HEATMAP_EVERY_UPDATES = 15  # cadence in rollout-consume events, not env step
+    HEATMAP_LOG_FIRST = True
 
     total_elapsed = 0.0
     for ep in range(int(episodes)):
@@ -841,17 +984,24 @@ def run_ppo_tsc(
                                 if use_expert_features and tls_id in expert_sem_dim:
                                     sem_dim = int(expert_sem_dim[tls_id])
 
-                                    # Proposal 1
+                                    log_hm, hm_event_idx = _next_heatmap_event(
+                                        tls_id,
+                                        expert_heatmap_event_idx,
+                                        every_updates=HEATMAP_EVERY_UPDATES,
+                                        log_first=HEATMAP_LOG_FIRST,
+                                    )
+
                                     tb_log_proposal1_expert_adv_corr_rollout(
                                         writer=writer,
                                         tls_id=tls_id,
-                                        step=step,
+                                        step=step,  # keep normal scalar x-axis for non-figure metrics
                                         buf=buf,
                                         sem_dim=sem_dim,
                                         tracker=expert_adv_corr_trackers.get(tls_id),
+                                        log_heatmap=log_hm,
+                                        heatmap_step=hm_event_idx,  # figure x-axis in update-event time
                                     )
 
-                                    # Proposal 2
                                     tb_log_proposal2_expert_core_xcorr_rollout(
                                         writer=writer,
                                         tls_id=tls_id,
@@ -859,6 +1009,8 @@ def run_ppo_tsc(
                                         buf=buf,
                                         sem_dim=sem_dim,
                                         tracker=expert_core_xcorr_trackers.get(tls_id),
+                                        log_heatmap=log_hm,
+                                        heatmap_step=hm_event_idx,
                                     )
 
                                 stats = agents[tls_id].update(buf)
@@ -1116,17 +1268,23 @@ def run_ppo_tsc(
                             if use_expert_features and tls_id in expert_sem_dim:
                                 sem_dim = int(expert_sem_dim[tls_id])
 
-                                # Proposal 1
+                                log_hm, hm_event_idx = _next_heatmap_event(
+                                    tls_id,
+                                    expert_heatmap_event_idx,
+                                    every_updates=HEATMAP_EVERY_UPDATES,
+                                    log_first=HEATMAP_LOG_FIRST,
+                                )
                                 tb_log_proposal1_expert_adv_corr_rollout(
                                     writer=writer,
                                     tls_id=tls_id,
-                                    step=step,
+                                    step=step,  # keep normal scalar x-axis for non-figure metrics
                                     buf=buf,
                                     sem_dim=sem_dim,
                                     tracker=expert_adv_corr_trackers.get(tls_id),
+                                    log_heatmap=log_hm,
+                                    heatmap_step=hm_event_idx,  # figure x-axis in update-event time
                                 )
 
-                                # Proposal 2
                                 tb_log_proposal2_expert_core_xcorr_rollout(
                                     writer=writer,
                                     tls_id=tls_id,
@@ -1134,8 +1292,9 @@ def run_ppo_tsc(
                                     buf=buf,
                                     sem_dim=sem_dim,
                                     tracker=expert_core_xcorr_trackers.get(tls_id),
+                                    log_heatmap=log_hm,
+                                    heatmap_step=hm_event_idx,
                                 )
-
                             stats = agents[tls_id].update(buf)
                             buf.clear()
 
