@@ -580,6 +580,483 @@ def proposal2_topk_abs_pairs(
     return out
 
 
+# ===========================
+# Probe dataset recording
+# ===========================
+
+
+@dataclass
+class ProbeEpisode:
+    X: np.ndarray  # [T, D_total] combined state = [core, expert]
+    r: np.ndarray  # [T]
+    meta: Dict[str, Any] = field(default_factory=dict)
+
+
+class ProbeRecorder:
+    """
+    Minimal episode recorder. Keeps last max_episodes episodes in memory.
+    Records every `stride` decision-steps to limit data size.
+    """
+
+    def __init__(self, max_episodes: int = 50, stride: int = 1) -> None:
+        self.max_episodes = int(max_episodes)
+        self.stride = max(1, int(stride))
+        self.episodes: Deque[ProbeEpisode] = deque(maxlen=self.max_episodes)
+
+        self._cur_X: List[np.ndarray] = []
+        self._cur_r: List[float] = []
+        self._cur_meta: Dict[str, Any] = {}
+        self._t = 0
+        self._active = False
+
+    def start_episode(self, meta: Optional[Dict[str, Any]] = None) -> None:
+        self._cur_X = []
+        self._cur_r = []
+        self._cur_meta = dict(meta or {})
+        self._t = 0
+        self._active = True
+
+    def record_step(self, state_vec: Any, reward: float) -> None:
+        if not self._active:
+            return
+        self._t += 1
+        if (self._t % self.stride) != 0:
+            return
+        x = np.asarray(state_vec, dtype=np.float32).reshape(-1)
+        self._cur_X.append(x)
+        self._cur_r.append(float(reward))
+
+    def end_episode(
+        self, meta_updates: Optional[Dict[str, Any]] = None
+    ) -> Optional[ProbeEpisode]:
+        if not self._active:
+            return None
+        self._active = False
+        if meta_updates:
+            self._cur_meta.update(meta_updates)
+
+        if len(self._cur_X) < 2:
+            return None
+
+        X = np.stack(self._cur_X, axis=0).astype(np.float32)
+        r = np.asarray(self._cur_r, dtype=np.float32)
+
+        ep = ProbeEpisode(X=X, r=r, meta=self._cur_meta)
+        self.episodes.append(ep)
+        return ep
+
+    def get_episodes(self) -> List[ProbeEpisode]:
+        return list(self.episodes)
+
+
+# ===========================
+# Dataset construction
+# ===========================
+
+
+def _split_core_exp(X: np.ndarray, sem_dim: int) -> Tuple[np.ndarray, np.ndarray]:
+    X = np.asarray(X, dtype=np.float32)
+    sem_dim = int(sem_dim)
+    if X.ndim != 2 or sem_dim <= 0 or sem_dim >= X.shape[1]:
+        return X, np.empty((X.shape[0], 0), dtype=np.float32)
+    core = X[:, : X.shape[1] - sem_dim]
+    exp = X[:, X.shape[1] - sem_dim :]
+    return core, exp
+
+
+def k_step_discounted_return(r: np.ndarray, gamma: float, k: int) -> np.ndarray:
+    """
+    y[t] = sum_{i=0..k-1} gamma^i r[t+i]
+    Only defined for t <= T-k. Returns length (T-k+1).
+    """
+    r = np.asarray(r, dtype=np.float32).reshape(-1)
+    k = int(k)
+    if k <= 0 or r.size < k:
+        return np.empty((0,), dtype=np.float32)
+
+    gam = (float(gamma) ** np.arange(k, dtype=np.float32)).astype(np.float32)
+    # sliding_window_view is available in modern numpy; safe to fallback if needed
+    try:
+        win = np.lib.stride_tricks.sliding_window_view(r, k)  # [T-k+1, k]
+        return (win * gam[None, :]).sum(axis=1).astype(np.float32)
+    except Exception:
+        out = np.empty((r.size - k + 1,), dtype=np.float32)
+        for t in range(out.size):
+            out[t] = float(np.dot(r[t : t + k], gam))
+        return out
+
+
+def probe_episode_split(
+    episodes: Sequence[ProbeEpisode],
+    val_frac: float = 0.2,
+    seed: int = 0,
+) -> Tuple[List[ProbeEpisode], List[ProbeEpisode]]:
+    eps = list(episodes)
+    if len(eps) < 2:
+        return eps, []
+    rng = np.random.RandomState(int(seed))
+    idx = np.arange(len(eps))
+    rng.shuffle(idx)
+    n_val = max(1, int(round(len(eps) * float(val_frac))))
+    val_idx = set(idx[:n_val].tolist())
+    tr = [eps[i] for i in range(len(eps)) if i not in val_idx]
+    va = [eps[i] for i in range(len(eps)) if i in val_idx]
+    return tr, va
+
+
+def probe_build_xy(
+    episodes: Sequence[ProbeEpisode],
+    sem_dim: int,
+    mode: str,
+    *,
+    gamma: float,
+    k: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    mode: 'core' | 'expert' | 'coreexp'
+    target: k-step discounted return
+    """
+    X_all: List[np.ndarray] = []
+    y_all: List[np.ndarray] = []
+
+    for ep in episodes:
+        X = np.asarray(ep.X, dtype=np.float32)
+        r = np.asarray(ep.r, dtype=np.float32).reshape(-1)
+        T = min(X.shape[0], r.shape[0])
+        if T < k:
+            continue
+
+        y = k_step_discounted_return(r[:T], gamma=gamma, k=k)  # len T-k+1
+        if y.size == 0:
+            continue
+        X0 = X[: y.size, :]  # align with y
+
+        core, exp = _split_core_exp(X0, sem_dim=sem_dim)
+        if mode == "core":
+            X_use = core
+        elif mode == "expert":
+            X_use = exp
+        elif mode == "coreexp":
+            X_use = X0
+        else:
+            raise ValueError(f"Unknown mode={mode}")
+
+        if X_use.shape[1] == 0:
+            continue
+        X_all.append(X_use)
+        y_all.append(y)
+
+    if not X_all:
+        return np.empty((0, 0), dtype=np.float32), np.empty((0,), dtype=np.float32)
+
+    X_out = np.concatenate(X_all, axis=0).astype(np.float32)
+    y_out = np.concatenate(y_all, axis=0).astype(np.float32)
+    return X_out, y_out
+
+
+def subsample_rows(
+    X: np.ndarray, y: np.ndarray, max_rows: int, seed: int
+) -> Tuple[np.ndarray, np.ndarray]:
+    X = np.asarray(X)
+    y = np.asarray(y)
+    max_rows = int(max_rows)
+    if max_rows <= 0 or X.shape[0] <= max_rows:
+        return X, y
+    rng = np.random.RandomState(int(seed))
+    idx = rng.choice(X.shape[0], size=max_rows, replace=False)
+    return X[idx], y[idx]
+
+
+# ===========================
+# Ridge regression (linear probe)
+# ===========================
+
+
+class Standardizer:
+    def __init__(self) -> None:
+        self.mean_: Optional[np.ndarray] = None
+        self.std_: Optional[np.ndarray] = None
+
+    def fit(self, X: np.ndarray) -> "Standardizer":
+        X = np.asarray(X, dtype=np.float64)
+        m = np.mean(X, axis=0)
+        s = np.std(X, axis=0)
+        s[s < 1e-8] = 1.0
+        self.mean_ = m
+        self.std_ = s
+        return self
+
+    def transform(self, X: np.ndarray) -> np.ndarray:
+        X = np.asarray(X, dtype=np.float64)
+        assert self.mean_ is not None and self.std_ is not None
+        return (X - self.mean_) / self.std_
+
+
+def ridge_fit(
+    X: np.ndarray,
+    y: np.ndarray,
+    alpha: float = 1.0,
+) -> Tuple[np.ndarray, float, Standardizer]:
+    """
+    Fits y ~ b + Xw with ridge penalty on w (not on intercept).
+    Returns (w, b, x_scaler).
+    """
+    X = np.asarray(X, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64).reshape(-1)
+
+    scaler = Standardizer().fit(X)
+    Xs = scaler.transform(X)
+
+    y_mean = float(np.mean(y))
+    yc = y - y_mean
+
+    d = Xs.shape[1]
+    A = Xs.T @ Xs
+    A.flat[:: d + 1] += float(alpha)  # add alpha*I
+    bvec = Xs.T @ yc
+    w = np.linalg.solve(A, bvec)
+    b0 = y_mean  # since X is standardized to mean 0, intercept is just mean(y)
+
+    return w.astype(np.float64), float(b0), scaler
+
+
+def ridge_predict(
+    X: np.ndarray, w: np.ndarray, b: float, scaler: Standardizer
+) -> np.ndarray:
+    Xs = scaler.transform(np.asarray(X, dtype=np.float64))
+    return (Xs @ w + float(b)).astype(np.float64)
+
+
+def r2_score(y: np.ndarray, yhat: np.ndarray) -> float:
+    y = np.asarray(y, dtype=np.float64).reshape(-1)
+    yhat = np.asarray(yhat, dtype=np.float64).reshape(-1)
+    if y.size < 2:
+        return float("nan")
+    ss_res = float(np.sum((y - yhat) ** 2))
+    ss_tot = float(np.sum((y - np.mean(y)) ** 2))
+    if ss_tot <= 1e-12:
+        return float("nan")
+    return 1.0 - ss_res / ss_tot
+
+
+def mae(y: np.ndarray, yhat: np.ndarray) -> float:
+    y = np.asarray(y, dtype=np.float64).reshape(-1)
+    yhat = np.asarray(yhat, dtype=np.float64).reshape(-1)
+    if y.size == 0:
+        return float("nan")
+    return float(np.mean(np.abs(y - yhat)))
+
+
+# ===========================
+# Additive cubic spline probe (basis expansion + ridge)
+# ===========================
+
+
+def spline_knots_quantile(
+    x: np.ndarray, n_knots: int, q_low: float = 0.05, q_high: float = 0.95
+) -> np.ndarray:
+    """
+    Returns interior knots based on quantiles. Filters duplicates.
+    """
+    x = np.asarray(x, dtype=np.float64).reshape(-1)
+    x = x[np.isfinite(x)]
+    if x.size < 10:
+        return np.empty((0,), dtype=np.float64)
+    qs = np.linspace(q_low, q_high, int(n_knots) + 2, dtype=np.float64)[1:-1]
+    k = np.quantile(x, qs)
+    k = np.unique(k)
+    return k.astype(np.float64)
+
+
+def spline_expand_truncated_power(
+    X: np.ndarray, knots_per_feature: List[np.ndarray]
+) -> np.ndarray:
+    """
+    For each feature x:
+      [x, x^2, x^3, (x-k1)_+^3, ...]
+    Intercept handled by ridge_fit.
+    """
+    X = np.asarray(X, dtype=np.float64)
+    n, d = X.shape
+    cols: List[np.ndarray] = []
+
+    for j in range(d):
+        x = X[:, j]
+        cols.append(x)
+        cols.append(x * x)
+        cols.append(x * x * x)
+        for k in knots_per_feature[j]:
+            t = np.maximum(x - float(k), 0.0)
+            cols.append(t * t * t)
+
+    Z = np.stack(cols, axis=1) if cols else np.empty((n, 0), dtype=np.float64)
+    return Z
+
+
+def spline_fit_predict(
+    Xtr: np.ndarray,
+    ytr: np.ndarray,
+    Xva: np.ndarray,
+    yva: np.ndarray,
+    *,
+    alpha: float,
+    n_knots: int,
+) -> Dict[str, Any]:
+    """
+    Fits additive spline probe (basis expansion + ridge).
+    Returns metrics and model artifacts.
+    """
+    Xtr = np.asarray(Xtr, dtype=np.float64)
+    Xva = np.asarray(Xva, dtype=np.float64)
+
+    d = Xtr.shape[1]
+    knots = [spline_knots_quantile(Xtr[:, j], n_knots=n_knots) for j in range(d)]
+
+    Ztr = spline_expand_truncated_power(Xtr, knots)
+    Zva = spline_expand_truncated_power(Xva, knots)
+
+    w, b, z_scaler = ridge_fit(Ztr, ytr, alpha=alpha)
+    yhat_tr = ridge_predict(Ztr, w, b, z_scaler)
+    yhat_va = ridge_predict(Zva, w, b, z_scaler)
+
+    return {
+        "model": {"w": w, "b": b, "z_scaler": z_scaler, "knots": knots},
+        "train": {"r2": r2_score(ytr, yhat_tr), "mae": mae(ytr, yhat_tr)},
+        "val": {"r2": r2_score(yva, yhat_va), "mae": mae(yva, yhat_va)},
+        "basis_dim": int(Ztr.shape[1]),
+    }
+
+
+# ===========================
+# Probe suite (linear + spline) for core vs coreexp
+# ===========================
+
+
+def run_probe_suite(
+    episodes: Sequence[ProbeEpisode],
+    sem_dim: int,
+    *,
+    gamma: float,
+    k_return: int,
+    val_frac: float = 0.2,
+    seed: int = 0,
+    max_samples: int = 50000,
+    alpha_linear: float = 1.0,
+    alpha_spline: float = 10.0,
+    spline_knots: int = 6,
+) -> Dict[str, Any]:
+    """
+    Returns a dict with metrics for:
+      - linear ridge probe: core vs coreexp
+      - spline probe: core vs coreexp
+    """
+    tr_eps, va_eps = probe_episode_split(episodes, val_frac=val_frac, seed=seed)
+    if not va_eps:
+        return {"ok": False, "reason": "not_enough_episodes"}
+
+    out: Dict[str, Any] = {
+        "ok": True,
+        "cfg": {
+            "gamma": float(gamma),
+            "k_return": int(k_return),
+            "val_frac": float(val_frac),
+            "seed": int(seed),
+            "max_samples": int(max_samples),
+            "alpha_linear": float(alpha_linear),
+            "alpha_spline": float(alpha_spline),
+            "spline_knots": int(spline_knots),
+        },
+    }
+
+    # Build train/val datasets (same target definition)
+    Xtr_core, ytr = probe_build_xy(
+        tr_eps, sem_dim, mode="core", gamma=gamma, k=k_return
+    )
+    Xva_core, yva = probe_build_xy(
+        va_eps, sem_dim, mode="core", gamma=gamma, k=k_return
+    )
+    Xtr_full, _ = probe_build_xy(
+        tr_eps, sem_dim, mode="coreexp", gamma=gamma, k=k_return
+    )
+    Xva_full, _ = probe_build_xy(
+        va_eps, sem_dim, mode="coreexp", gamma=gamma, k=k_return
+    )
+
+    if (
+        Xtr_core.size == 0
+        or Xva_core.size == 0
+        or Xtr_full.size == 0
+        or Xva_full.size == 0
+    ):
+        return {"ok": False, "reason": "empty_xy"}
+
+    # Subsample to control cost
+    Xtr_core, ytr = subsample_rows(Xtr_core, ytr, max_rows=max_samples, seed=seed + 11)
+    Xva_core, yva = subsample_rows(Xva_core, yva, max_rows=max_samples, seed=seed + 13)
+    Xtr_full, _ = subsample_rows(
+        Xtr_full, ytr, max_rows=Xtr_core.shape[0], seed=seed + 17
+    )
+    Xva_full, _ = subsample_rows(
+        Xva_full, yva, max_rows=Xva_core.shape[0], seed=seed + 19
+    )
+
+    # ----- Linear ridge probe
+    w_c, b_c, sc_c = ridge_fit(Xtr_core, ytr, alpha=alpha_linear)
+    yhat_c_va = ridge_predict(Xva_core, w_c, b_c, sc_c)
+
+    w_f, b_f, sc_f = ridge_fit(Xtr_full, ytr, alpha=alpha_linear)
+    yhat_f_va = ridge_predict(Xva_full, w_f, b_f, sc_f)
+
+    out["linear"] = {
+        "core": {"val_r2": r2_score(yva, yhat_c_va), "val_mae": mae(yva, yhat_c_va)},
+        "coreexp": {"val_r2": r2_score(yva, yhat_f_va), "val_mae": mae(yva, yhat_f_va)},
+    }
+    out["linear"]["delta_val_r2"] = float(
+        out["linear"]["coreexp"]["val_r2"] - out["linear"]["core"]["val_r2"]
+    )
+    out["linear"]["delta_val_mae"] = float(
+        out["linear"]["core"]["val_mae"] - out["linear"]["coreexp"]["val_mae"]
+    )
+
+    # ----- Spline probe (additive cubic spline basis + ridge)
+    spline_core = spline_fit_predict(
+        Xtr_core, ytr, Xva_core, yva, alpha=alpha_spline, n_knots=spline_knots
+    )
+    spline_full = spline_fit_predict(
+        Xtr_full, ytr, Xva_full, yva, alpha=alpha_spline, n_knots=spline_knots
+    )
+
+    out["spline"] = {
+        "core": {
+            "val_r2": float(spline_core["val"]["r2"]),
+            "val_mae": float(spline_core["val"]["mae"]),
+            "basis_dim": int(spline_core["basis_dim"]),
+        },
+        "coreexp": {
+            "val_r2": float(spline_full["val"]["r2"]),
+            "val_mae": float(spline_full["val"]["mae"]),
+            "basis_dim": int(spline_full["basis_dim"]),
+        },
+    }
+    out["spline"]["delta_val_r2"] = float(
+        out["spline"]["coreexp"]["val_r2"] - out["spline"]["core"]["val_r2"]
+    )
+    out["spline"]["delta_val_mae"] = float(
+        out["spline"]["core"]["val_mae"] - out["spline"]["coreexp"]["val_mae"]
+    )
+
+    out["data"] = {
+        "n_train": int(Xtr_core.shape[0]),
+        "n_val": int(Xva_core.shape[0]),
+        "d_core": int(Xtr_core.shape[1]),
+        "d_full": int(Xtr_full.shape[1]),
+        "n_episodes_train": int(len(tr_eps)),
+        "n_episodes_val": int(len(va_eps)),
+    }
+
+    return out
+
+
 """
 phase management (finding out major green phases and register auxilliary phases)
 """
@@ -1234,9 +1711,6 @@ def reward_softmax_wait_barrier_from_encoded_state(
     return -float(penalty)
 
 
-# =======================
-# [NEW] time-since-served starvation cost from encoded state (for potential shaping)
-# =======================
 def starvation_cost_from_encoded_state(
     *,
     tls_id: str,
@@ -1364,9 +1838,6 @@ def reward_throughput_per_second_on_decision(
     return count / dt
 
 
-# =======================
-# [NEW] composite reward variant using softmax queue term
-# =======================
 def reward_throughput_plus_softmax_queue(
     *,
     tls_id: str,
@@ -1421,9 +1892,6 @@ def reward_throughput_plus_softmax_queue(
     return float(r)
 
 
-# =======================
-# [NEW] composite reward: throughput + softmax queue + delta softmax queue + softmax wait barrier
-# =======================
 rcnt = 0
 
 

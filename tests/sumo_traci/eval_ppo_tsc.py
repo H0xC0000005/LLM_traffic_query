@@ -65,6 +65,77 @@ def _encode_core(
     raise ValueError(f"unknown encoder_name: {encoder_name}")
 
 
+def _fit_tail_dim(x: np.ndarray, target_dim: int) -> np.ndarray:
+    x = np.asarray(x, dtype=np.float32).reshape(-1)
+    if x.size == target_dim:
+        return x
+    if x.size > target_dim:
+        # keep prefix if your expert extractor preserves order;
+        # if semantics changed, better to raise instead.
+        return x[:target_dim].astype(np.float32)
+    # pad with zeros
+    out = np.zeros((target_dim,), dtype=np.float32)
+    out[: x.size] = x
+    return out
+
+
+# def encode_state_for_policy(
+#     tls_id: str,
+#     *,
+#     cache_root: Dict[str, Any],
+#     meta_encoder_name: str,
+#     use_expert_features: bool,
+#     zero_expert_features: bool,
+#     # granular expert ablation
+#     zero_expert_dims: List[int],
+#     noise_expert_dims: List[int],
+#     noise_sigma: float,
+# ) -> Tuple[np.ndarray, int]:
+#     """
+#     Returns:
+#       state_vec: np.float32 (state_dim,)
+#       core_dim:  int length of the core slice (used to locate expert slice)
+#     """
+#     if use_expert_features:
+#         core_cache = cache_root.setdefault("_enc_core", {})
+#         sem_cache = cache_root.setdefault("_enc_sem", {})
+
+#         # IMPORTANT: match your training combined encoder (core=v2 + expert)
+#         core = encode_tsc_state_vector_bounded_v2(
+#             tls_id,
+#             moving_speed_threshold=0.1,
+#             stopped_speed_threshold=0.1,
+#             cache=core_cache,
+#         ).astype(np.float32)
+#         core_dim = int(core.shape[0])
+
+#         if zero_expert_features:
+#             expert = np.zeros((27,), dtype=np.float32)
+#         else:
+#             expert = np.asarray(
+#                 tsc_isolated_intersection_feature_vector(tls_id),
+#                 dtype=np.float32,
+#             )
+
+#         # granular expert ablation
+#         if (not zero_expert_features) and expert.size > 0:
+#             for d in zero_expert_dims:
+#                 if 0 <= d < expert.shape[0]:
+#                     expert[d] = 0.0
+
+#             if noise_sigma > 0 and len(noise_expert_dims) > 0:
+#                 for d in noise_expert_dims:
+#                     if 0 <= d < expert.shape[0]:
+#                         expert[d] += np.random.normal(0.0, noise_sigma)
+
+#         return np.concatenate([core, expert], axis=0), core_dim
+
+#     # core-only encoders
+#     core_cache = cache_root
+#     core = _encode_core(tls_id, cache=core_cache, encoder_name=meta_encoder_name)
+#     return core, int(core.shape[0])
+
+
 def encode_state_for_policy(
     tls_id: str,
     *,
@@ -72,21 +143,15 @@ def encode_state_for_policy(
     meta_encoder_name: str,
     use_expert_features: bool,
     zero_expert_features: bool,
-    # granular expert ablation
     zero_expert_dims: List[int],
     noise_expert_dims: List[int],
     noise_sigma: float,
+    expected_state_dim: Optional[int] = None,  # NEW
+    expected_expert_dim: Optional[int] = None,  # NEW
 ) -> Tuple[np.ndarray, int]:
-    """
-    Returns:
-      state_vec: np.float32 (state_dim,)
-      core_dim:  int length of the core slice (used to locate expert slice)
-    """
     if use_expert_features:
         core_cache = cache_root.setdefault("_enc_core", {})
-        sem_cache = cache_root.setdefault("_enc_sem", {})
 
-        # IMPORTANT: match your training combined encoder (core=v2 + expert)
         core = encode_tsc_state_vector_bounded_v2(
             tls_id,
             moving_speed_threshold=0.1,
@@ -95,38 +160,63 @@ def encode_state_for_policy(
         ).astype(np.float32)
         core_dim = int(core.shape[0])
 
-        if zero_expert_features:
-            expert = np.zeros(
-                (27,), dtype=np.float32
-            )  # expert extractor output is length 27
-        else:
-            expert = np.asarray(
-                tsc_isolated_intersection_feature_vector(tls_id, cache=sem_cache),
-                dtype=np.float32,
+        # derive expected expert dim from meta/checkpoint if available
+        if expected_expert_dim is None:
+            if expected_state_dim is not None:
+                expected_expert_dim = int(expected_state_dim) - core_dim
+            else:
+                # fallback: use runtime extractor size (least preferred)
+                expected_expert_dim = int(
+                    np.asarray(tsc_isolated_intersection_feature_vector(tls_id), dtype=np.float32).size
+                )
+
+        if expected_expert_dim < 0:
+            raise ValueError(
+                f"Invalid dims: expected_state_dim={expected_state_dim}, core_dim={core_dim}, "
+                f"derived expert_dim={expected_expert_dim}"
             )
 
-        # granular expert ablation
-        if (not zero_expert_features) and expert.size > 0:
-            for d in zero_expert_dims:
-                if 0 <= d < expert.shape[0]:
-                    expert[d] = 0.0
+        # Optional strict compatibility check for core dim
+        if expected_state_dim is not None and (core_dim + expected_expert_dim) != int(expected_state_dim):
+            raise ValueError(
+                f"State dim mismatch before expert assembly: core_dim={core_dim}, "
+                f"expected_expert_dim={expected_expert_dim}, expected_state_dim={expected_state_dim}"
+            )
 
-            if noise_sigma > 0 and len(noise_expert_dims) > 0:
-                for d in noise_expert_dims:
+        if zero_expert_features:
+            expert = np.zeros((expected_expert_dim,), dtype=np.float32)
+        else:
+            expert_raw = np.asarray(tsc_isolated_intersection_feature_vector(tls_id), dtype=np.float32)
+            expert = _fit_tail_dim(expert_raw, expected_expert_dim)
+
+            # granular ablation on the fitted expert vector
+            if expert.size > 0:
+                for d in zero_expert_dims:
                     if 0 <= d < expert.shape[0]:
-                        expert[d] += np.random.normal(0.0, noise_sigma)
+                        expert[d] = 0.0
+                if noise_sigma > 0 and len(noise_expert_dims) > 0:
+                    for d in noise_expert_dims:
+                        if 0 <= d < expert.shape[0]:
+                            expert[d] += np.random.normal(0.0, noise_sigma)
 
-        return np.concatenate([core, expert], axis=0), core_dim
+        state = np.concatenate([core, expert], axis=0).astype(np.float32)
 
-    # core-only encoders
-    core_cache = cache_root
-    core = _encode_core(tls_id, cache=core_cache, encoder_name=meta_encoder_name)
-    return core, int(core.shape[0])
+        if expected_state_dim is not None and state.size != int(expected_state_dim):
+            raise ValueError(
+                f"Final state size mismatch: got {state.size}, expected {expected_state_dim} "
+                f"(core={core_dim}, expert={expert.size})"
+            )
+
+        return state, core_dim
+
+    # core-only path
+    core = _encode_core(tls_id, cache=cache_root, encoder_name=meta_encoder_name)
+    if expected_state_dim is not None and core.size != int(expected_state_dim):
+        raise ValueError(f"Core-only state size mismatch: got {core.size}, expected {expected_state_dim}")
+    return core.astype(np.float32), int(core.shape[0])
 
 
-def get_num_lanes_from_cache(
-    cache_root: Dict[str, Any], use_expert_features: bool
-) -> int:
+def get_num_lanes_from_cache(cache_root: Dict[str, Any], use_expert_features: bool) -> int:
     if use_expert_features:
         lane_ids = cache_root.get("_enc_core", {}).get("lane_ids", [])
     else:
@@ -167,27 +257,17 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
         raise FileNotFoundError(f"checkpoint not found: {ckpt_path}")
 
     # load metadata json (optional)
-    meta_path = (
-        Path(args.meta) if args.meta is not None else ckpt_path.with_suffix(".json")
-    )
+    meta_path = Path(args.meta) if args.meta is not None else ckpt_path.with_suffix(".json")
     if not meta_path.exists():
         raise FileNotFoundError(f"meta json not found: {meta_path}")
 
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
 
     # load checkpoint
-    device = (
-        args.device
-        if args.device is not None
-        else ("cuda" if torch.cuda.is_available() else "cpu")
-    )
+    device = args.device if args.device is not None else ("cuda" if torch.cuda.is_available() else "cpu")
     print(f"> Using device: {device}")
     ckpt = torch.load(str(ckpt_path), map_location=device)
-    state_dict = (
-        ckpt["model_state_dict"]
-        if isinstance(ckpt, dict) and "model_state_dict" in ckpt
-        else ckpt
-    )
+    state_dict = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
 
     tls_id = args.tls_id if args.tls_id is not None else str(meta.get("tls_id", ""))
     print(f"> Using tls_id: {tls_id}")
@@ -202,6 +282,7 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
     state_dim = int(meta["state_dim"])
     action_dim = int(meta["action_dim"])
     hidden_dim = int(meta.get("hidden_dim", 256))
+    expert_feature_dim = int(meta.get("expert_dim", 0)) if bool(meta.get("use_expert_features", False)) else 0
     layer_count = int(meta.get("layer_count", 2))
     use_skip = bool(meta.get("use_skip", False))
 
@@ -214,21 +295,11 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
     episodes = int(args.episodes)
     episode_len_s = float(args.episode_len)
     warmup_s = float(args.warmup)
-    action_hold_s = (
-        float(args.hold)
-        if args.hold is not None
-        else float(meta.get("action_hold_s", 10.0))
-    )
+    action_hold_s = float(args.hold) if args.hold is not None else float(meta.get("action_hold_s", 10.0))
 
-    sumo_seed_base = (
-        int(args.sumo_seed)
-        if args.sumo_seed is not None
-        else int(meta.get("sumo_seed", 0))
-    )
+    sumo_seed_base = int(args.sumo_seed) if args.sumo_seed is not None else int(meta.get("sumo_seed", 0))
     traffic_scale = (
-        float(args.traffic_scale)
-        if args.traffic_scale is not None
-        else float(meta.get("traffic_scale_mean", 1.0))
+        float(args.traffic_scale) if args.traffic_scale is not None else float(meta.get("traffic_scale_mean", 1.0))
     )
     print(f"> Using traffic_scale: {traffic_scale}")
 
@@ -260,11 +331,7 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
 
     ts = int(time.time())
     tag = f"__{args.log_tag}" if args.log_tag else ""
-    mode = (
-        "zeroexp"
-        if (args.zero_expert and bool(meta.get("use_expert_features", False)))
-        else "normal"
-    )
+    mode = "zeroexp" if (args.zero_expert and bool(meta.get("use_expert_features", False))) else "normal"
     print(f"> Eval mode: {mode}")
     base = f"eval_{meta.get('run_name','run')}__{tls_id}__{mode}{tag}__{ts}"
     jsonl_path = log_dir / f"{base}.jsonl"
@@ -301,12 +368,8 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
         hidden_dim=hidden_dim,
         n_layer=layer_count,
         use_skip=use_skip,
-        actor_lr=float(
-            meta.get("actor_lr", 3e-4)
-        ),  # irrelevant for eval but required by class
-        critic_lr=float(
-            meta.get("critic_lr", 1e-3)
-        ),  # irrelevant for eval but required by class
+        actor_lr=float(meta.get("actor_lr", 3e-4)),  # irrelevant for eval but required by class
+        critic_lr=float(meta.get("critic_lr", 1e-3)),  # irrelevant for eval but required by class
         device=device,
         clip_eps=float(meta.get("clip_eps", 0.2)),
         vf_clip_eps=float(meta.get("vf_clip_eps", 0.2)),
@@ -369,19 +432,14 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
 
             while True:
                 sim_t = float(traci.simulation.getTime())
-                done_episode = (sim_t >= episode_len_s) or (
-                    traci.simulation.getMinExpectedNumber() <= 0
-                )
+                done_episode = (sim_t >= episode_len_s) or (traci.simulation.getMinExpectedNumber() <= 0)
                 in_control = sim_t >= warmup_s
 
                 # keep throughput tracker up-to-date every sim step
                 throughput_tracker_step(tls_id, cache_root)
 
                 # advance aux segments if needed (only relevant after policy starts)
-                if (
-                    tls_state.segment_end_time > 0.0
-                    and sim_t >= tls_state.segment_end_time
-                ):
+                if tls_state.segment_end_time > 0.0 and sim_t >= tls_state.segment_end_time:
                     tls_state.segment_end_time = tls_advance_pending_segments(
                         tls_id=tls_id,
                         pending_segments=tls_state.pending_segments,
@@ -391,11 +449,7 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
 
                 if done_episode:
                     # close last controlled interval if exists
-                    if (
-                        in_control
-                        and tls_state.prev_in_control
-                        and tls_state.prev_state is not None
-                    ):
+                    if in_control and tls_state.prev_in_control and tls_state.prev_state is not None:
                         # terminal next-state for queue term
                         s_next, _core_dim = encode_state_for_policy(
                             tls_id,
@@ -406,17 +460,13 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
                             zero_expert_dims=zero_dims,
                             noise_expert_dims=noise_dims,
                             noise_sigma=noise_sigma,
+                            expected_state_dim=state_dim,  # NEW
+                            expected_expert_dim=expert_feature_dim,  # NEW
                         )
-                        num_lanes = get_num_lanes_from_cache(
-                            cache_root, use_expert_features
-                        )
+                        num_lanes = get_num_lanes_from_cache(cache_root, use_expert_features)
 
-                        thr = reward_throughput_per_second_on_decision(
-                            sim_time=sim_t, cache=cache_root
-                        )
-                        thr_norm = min(
-                            1.0, max(0.0, float(thr) / max(1e-6, throughput_ref))
-                        )
+                        thr = reward_throughput_per_second_on_decision(sim_time=sim_t, cache=cache_root)
+                        thr_norm = min(1.0, max(0.0, float(thr) / max(1e-6, throughput_ref)))
 
                         q_reward = reward_softmax_queue_from_encoded_state(
                             s_next,
@@ -458,19 +508,15 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
                         zero_expert_dims=zero_dims,
                         noise_expert_dims=noise_dims,
                         noise_sigma=noise_sigma,
+                        expected_state_dim=state_dim,  # NEW
+                        expected_expert_dim=expert_feature_dim,  # NEW
                     )
-                    num_lanes = get_num_lanes_from_cache(
-                        cache_root, use_expert_features
-                    )
+                    num_lanes = get_num_lanes_from_cache(cache_root, use_expert_features)
 
                     # close previous interval reward
                     if tls_state.prev_in_control and tls_state.prev_state is not None:
-                        thr = reward_throughput_per_second_on_decision(
-                            sim_time=sim_t, cache=cache_root
-                        )
-                        thr_norm = min(
-                            1.0, max(0.0, float(thr) / max(1e-6, throughput_ref))
-                        )
+                        thr = reward_throughput_per_second_on_decision(sim_time=sim_t, cache=cache_root)
+                        thr_norm = min(1.0, max(0.0, float(thr) / max(1e-6, throughput_ref)))
 
                         q_reward = reward_softmax_queue_from_encoded_state(
                             s_cur,
@@ -500,9 +546,7 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
 
                     else:
                         # first controlled decision: initialize throughput window
-                        _ = reward_throughput_per_second_on_decision(
-                            sim_time=sim_t, cache=cache_root
-                        )
+                        _ = reward_throughput_per_second_on_decision(sim_time=sim_t, cache=cache_root)
 
                     # select action
                     if args.deterministic:
@@ -511,9 +555,7 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
                         a, _logp, _v = agent.act(s_cur)
 
                     # --- policy distribution at this decision ---
-                    logits, probs, _v = agent.forward_logits_value(
-                        s_cur, return_probs=True, to_cpu=True
-                    )
+                    logits, probs, _v = agent.forward_logits_value(s_cur, return_probs=True, to_cpu=True)
                     p = probs.numpy()[0]  # (action_dim,)
                     pi_sum += p
                     pi_entropy_sum += float(-(p * np.log(np.clip(p, 1e-12, 1.0))).sum())
@@ -527,9 +569,7 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
                     last_action = int(a)
 
                     # map policy action -> major green phase index (SUMO phase id)
-                    target_major_phase = tls_action_to_major_phase(
-                        tls_id, cache_root, action=int(a)
-                    )
+                    target_major_phase = tls_action_to_major_phase(tls_id, cache_root, action=int(a))
 
                     # build segment list (aux phases then target major green)
                     segments = tls_build_switch_segments(
@@ -546,9 +586,7 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
 
                     tls_state.pending_segments = deque(segments[1:])
                     tls_state.segment_end_time = sim_t + float(first_dur)
-                    tls_state.next_decision_time = sim_t + float(
-                        sum(d for _, d in segments)
-                    )
+                    tls_state.next_decision_time = sim_t + float(sum(d for _, d in segments))
 
                     # store for next interval closure
                     tls_state.prev_state = s_cur
@@ -675,9 +713,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
 
     # paths
-    ap.add_argument(
-        "--checkpoint", type=str, required=True, help="Path to .pt checkpoint"
-    )
+    ap.add_argument("--checkpoint", type=str, required=True, help="Path to .pt checkpoint")
     ap.add_argument(
         "--meta",
         type=str,
@@ -698,9 +734,7 @@ def main() -> None:
     )
 
     # SUMO runtime knobs
-    ap.add_argument(
-        "--sumocfg", type=str, default=None, help="Override sumocfg in meta"
-    )
+    ap.add_argument("--sumocfg", type=str, default=None, help="Override sumocfg in meta")
     ap.add_argument("--tls-id", type=str, default=None, help="Override tls_id in meta")
     ap.add_argument("--gui", action="store_true")
     ap.add_argument("--delay-ms", type=int, default=1)
@@ -709,9 +743,7 @@ def main() -> None:
     ap.add_argument("--episodes", type=int, default=10)
     ap.add_argument("--episode-len", type=float, default=3600.0)
     ap.add_argument("--warmup", type=float, default=100.0)
-    ap.add_argument(
-        "--hold", type=float, default=None, help="Override action_hold_s in meta"
-    )
+    ap.add_argument("--hold", type=float, default=None, help="Override action_hold_s in meta")
     ap.add_argument("--sumo-seed", type=int, default=None)
     ap.add_argument("--traffic-scale", type=float, default=None)
 

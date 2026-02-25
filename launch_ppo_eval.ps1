@@ -11,16 +11,19 @@ $env:SUMO_HOME = "E:\Sumo"
 Set-Location $WorkDir
 
 $EvalArgs = @(
-  "--checkpoint", "E:\repos\LLM_traffic_query\tests\sumo_traci\ppo_tsc_models\sumo_ppo_seed518_1768538101__J2.pt",
-  "--log-tag", "nh3",
-  "--log-dir", "tests\sumo_traci\eval_results\perdim",
-  "--episodes", "20",
+#   "--checkpoint", "E:\repos\LLM_traffic_query\tests\sumo_traci\models_3LR23LR2\1\sumo_ppo_seed172_base1_600ep_2048roll_5step_1771590042__J1.pt",
+#   "--checkpoint", "E:\repos\LLM_traffic_query\tests\sumo_traci\models_3LR23LR2\1\sumo_ppo_seed172_exp1_600ep_2048roll_5step_1771581502__J1.pt",
+  "--checkpoint", "E:\repos\LLM_traffic_query\tests\sumo_traci\models_22+22+_2\sumo_ppo_seed172_exp1_600ep_1_1771926979__J1.pt",
+  "--log-tag", "zeroblk_1_2",
+  "--log-dir", "tests\sumo_traci\eval_results\22+22+_1",
+  "--episodes", "200",
   "--episode-len", "3600",
   "--sumo-seed", "10086",
   "--deterministic",
 #   "--zero-expert",
-  "--zero-expert-dims", " ",
-  "--noise-expert-dims", "15,16,17,18,19,20",
+#  "0,1,2,3,4", "5,6,7,8,9,10,11,12,13,14,15,16", "17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32", "33,34,35,36"
+  "--zero-expert-dims", "5,6,7,8,9,10,11,12,13,14,15,16",
+  "--noise-expert-dims", " ",
   "--noise-sigma", "0.15"
 )
 
