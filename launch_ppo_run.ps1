@@ -24,7 +24,7 @@ $RunArgs = @(
   "--n-layer", "6",
   "--actor-lr", "0.00005",
   "--critic-lr", "0.0001",
-  "--traffic-scale-mean", "01.0",
+  "--traffic-scale-mean", "01.3",
   "--traffic-scale-std", "0.05",
 #   "--tb-logdir", "E:\repos\LLM_traffic_query\tests\sumo_traci\tsb_3LR23LR2_2",
   "--tb-logdir", "E:\repos\LLM_traffic_query\tests\sumo_traci\tsb_22+22+_2",
@@ -60,7 +60,7 @@ $RunArgs = @(
   "--reward-clip-lo", "-5.0",
   "--reward-clip-hi", "5.0",
   "--use-expert-features",
-  "--log-tag", "exp1_600ep_1"
+  "--log-tag", "exp1_600ep_1_scenariofixed_1.3x"
 )
 
 & $PythonExe $ScriptPath @RunArgs

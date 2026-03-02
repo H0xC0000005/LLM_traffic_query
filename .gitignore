@@ -9,7 +9,8 @@ dqn_tsc_models
 ppo_tsc_models
 ppo_tsc_models*
 eval_results
-expert_function_cache
+expert_function_cache*
+dataset*
 expert_feat_extractor_archive
 
 
