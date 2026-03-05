@@ -10,9 +10,11 @@ ppo_tsc_models
 ppo_tsc_models*
 eval_results
 expert_function_cache*
-dataset*
+ashrae-energy*
 expert_feat_extractor_archive
-
+expert_function_cache
+expert_extractor_cache
+lgbm_debug_no_ids
 
 out.txt
 memo.txt

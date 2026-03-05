@@ -1,0 +1,37 @@
+{
+  "categorical_columns": [
+    "primary_use: a string denoting building purpose (e.g. Education/Office/Residential)",
+    "meter: the type of energy meter ({0: electricity, 1: chilledwater, 2: steam, 3: hotwater})",
+    "dayofweek: the day of the week (0: Monday, 1: Tuesday, ..., 6: Sunday)"
+  ],
+  "feature_columns": [
+    "meter",
+    "primary_use",
+    "square_feet",
+    "floor_count: can be null",
+    "air_temperature",
+    "cloud_coverage: 0-9, can be null",
+    "dew_temperature",
+    "precip_depth_1_hr: precipitation depth in mm of hour, can be null",
+    "sea_level_pressure: sea level pressure in millibar, can be null",
+    "wind_direction: wind direction in degrees, can be null",
+    "wind_speed",
+    "hour_sin",
+    "hour_cos",
+    "dayofweek",
+    "doy_sin",
+    "doy_cos",
+    "is_weekend",
+    "is_na_holiday",
+    "is_eu_holiday",
+    "is_holiday_any",
+    "is_business_hours",
+    "CDH_18C: cooling degree hours above 18C",
+    "HDH_18C: heating degree hours below 18C",
+    "is_hot_24C: whether the temperature is hot (above 24C)",
+    "is_cold_10C: whether the temperature is cold (below 10C)",
+    "dewpoint_depression: the difference between air temperature and dew temperature",
+    "log_sqft",
+    "year_built_clipped: the year the building was built, clipped to 1920-2016 (can be null)"
+  ]
+}
