@@ -15,6 +15,7 @@ expert_feat_extractor_archive
 expert_function_cache
 expert_extractor_cache
 lgbm_debug_no_ids
+submissions
 
 out.txt
 memo.txt

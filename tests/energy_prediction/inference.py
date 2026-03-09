@@ -13,6 +13,9 @@ import utility
 from expert_feature_extractor import extract_expert_features
 
 
+DEFAULT_KBTU_TO_KWH = 0.293071
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser("Inference for ASHRAE GEPIII LightGBM model (baseline + expert features)")
 
@@ -40,8 +43,8 @@ def parse_args() -> argparse.Namespace:
     g.add_argument(
         "--use_expert_features",
         action="store_true",
-        default=True,
-        help="Compute expert features with extract_expert_features(df) and append before prediction (default: on)",
+        default=False,
+        help="Compute expert features with extract_expert_features(df) and append before prediction ",
     )
     g.add_argument(
         "--no_expert_features",
@@ -78,6 +81,11 @@ def parse_args() -> argparse.Namespace:
     # Misc
     p.add_argument("--engine", type=str, default="pyarrow", choices=["pyarrow", "fastparquet"])
     p.add_argument("--seed", type=int, default=42)
+
+    u = p.add_mutually_exclusive_group()
+    u.add_argument("--invert_site0_meter0_to_kbtu", action="store_true", default=True)
+    u.add_argument("--no_invert_site0_meter0_to_kbtu", dest="invert_site0_meter0_to_kbtu", action="store_false")
+    p.add_argument("--kbtu_to_kwh", type=float, default=DEFAULT_KBTU_TO_KWH)
 
     return p.parse_args()
 
@@ -130,16 +138,14 @@ def _resolve_use_log1p(model_dir: Path, cli_value: Optional[bool]) -> bool:
     return False
 
 
-def _attach_expert_features(df: pd.DataFrame, label_col: str) -> pd.DataFrame:
+def _attach_expert_features(df: "pd.DataFrame", label_col: str, *, expert_cache: "dict | None") -> "pd.DataFrame":
     """
-    Mirrors the training-time expert feature appending logic from train_tree_lgbm.py:
-      - extract_expert_features(df) -> expert_df (DataFrame-like)
-      - drop forbidden cols
-      - cast object -> category
-      - rename colliding expert columns deterministically with 'expert__' prefix
-      - concat to df (column-wise)
+    Same as before, but passes a restored cache into extract_expert_features(...),
+    enabling inference-time feature extraction without meter_reading.
     """
-    expert_df = extract_expert_features(df)
+    expert_df = extract_expert_features(
+        df, cache=expert_cache
+    )  # changed vs original :contentReference[oaicite:0]{index=0}
     if expert_df is None:
         raise ValueError("Expert feature extractor returned None; expected a DataFrame with expert features.")
     if not isinstance(expert_df, pd.DataFrame):
@@ -148,7 +154,6 @@ def _attach_expert_features(df: pd.DataFrame, label_col: str) -> pd.DataFrame:
     if len(expert_df) != len(df):
         raise ValueError(f"Expert feature rows mismatch: {len(expert_df)} vs {len(df)}")
 
-    # Ensure positional alignment if indices differ.
     if not expert_df.index.equals(df.index):
         expert_df = expert_df.reset_index(drop=True)
         df = df.reset_index(drop=True)
@@ -158,12 +163,10 @@ def _attach_expert_features(df: pd.DataFrame, label_col: str) -> pd.DataFrame:
     if cols_to_drop:
         expert_df = expert_df.drop(columns=cols_to_drop)
 
-    # Treat object cols as categoricals (LightGBM compatibility)
     obj_cols = [c for c in expert_df.columns if expert_df[c].dtype == object]
     if obj_cols:
         expert_df[obj_cols] = expert_df[obj_cols].astype("category")
 
-    # Avoid name collisions with existing df columns (deterministic)
     existing_cols = set(df.columns)
     rename_map = {}
     used_new = set()
@@ -186,32 +189,68 @@ def _attach_expert_features(df: pd.DataFrame, label_col: str) -> pd.DataFrame:
 
 
 def _build_feature_matrix(df: pd.DataFrame, feature_cols: List[str], categorical_cols: List[str]) -> pd.DataFrame:
-    """
-    Build X with columns exactly matching `feature_cols` in the same order.
-    Missing columns are created as NaN.
-    Ensures categorical cols are pandas 'category' dtype.
-    """
-    X = pd.DataFrame(index=df.index)
+    # Fail fast on missing features
+    missing = [c for c in feature_cols if c not in df.columns]
+    if missing:
+        missing_preview = missing[:50]
+        more = "" if len(missing) <= 50 else f" (and {len(missing) - 50} more)"
+        raise KeyError(
+            "Missing expected feature columns in inference dataset. "
+            "This usually means expert features were not generated/appended, or feature names drifted.\n"
+            f"Missing ({len(missing)}): {missing_preview}{more}"
+        )
 
-    # Add columns in the exact order
-    for c in feature_cols:
-        if c in df.columns:
-            X[c] = df[c]
-        else:
-            X[c] = np.nan
+    # Build X in the exact order expected by the model
+    X = df.loc[:, feature_cols].copy()
 
-    # Convert categoricals to category dtype
-    cat_present = [c for c in categorical_cols if c in X.columns]
-    for c in cat_present:
-        if not pd.api.types.is_categorical_dtype(X[c]):
+    # Convert declared categoricals to category dtype
+    for c in categorical_cols:
+        if c in X.columns and not pd.api.types.is_categorical_dtype(X[c]):
             X[c] = X[c].astype("category")
 
-    # Safety: convert remaining object columns to category.
+    # Safety: convert remaining object columns to category
     obj_cols = [c for c in X.columns if X[c].dtype == "object"]
     if obj_cols:
         X[obj_cols] = X[obj_cols].astype("category")
 
     return X
+
+
+def _load_pickle_if_exists(path: "Path") -> "dict | None":
+    import pickle
+
+    if not path.exists():
+        return None
+    with open(path, "rb") as f:
+        obj = pickle.load(f)
+    if not isinstance(obj, dict):
+        raise ValueError(f"Expected a pickled dict at {path}, got {type(obj)}")
+    return obj
+
+
+def _resolve_expert_cache(model_dir: "Path") -> "dict | None":
+    """
+    Load the pickled expert-feature cache saved during training.
+
+    Priority:
+      1) model_dir/feature_manifest.json["expert_cache_file"] (if present)
+      2) model_dir/expert_feature_cache.pkl (fallback)
+    """
+    manifest = _load_json_if_exists(model_dir / "feature_manifest.json")  # existing helper
+    candidates = []
+
+    if isinstance(manifest, dict):
+        v = manifest.get("expert_cache_file")
+        if isinstance(v, str) and v.strip():
+            candidates.append(model_dir / v)
+
+    candidates.append(model_dir / "expert_feature_cache.pkl")
+
+    for p in candidates:
+        cache = _load_pickle_if_exists(p)
+        if cache is not None:
+            return cache
+    return None
 
 
 def main() -> None:
@@ -229,18 +268,27 @@ def main() -> None:
 
     booster = lgb.Booster(model_file=str(model_path))
 
-    # Expected feature schema from training
     feature_cols, categorical_cols = _resolve_expected_features(model_dir, booster)
-
-    # Whether to apply expm1
     use_log1p = _resolve_use_log1p(model_dir, args.use_log1p_target)
 
-    # Load test dataset.
-    # If expert features are enabled, load full dataset so the extractor can access everything.
+    # NEW: load expert-feature cache (required when test has no meter_reading)
+    expert_cache = None
+    if args.use_expert_features:
+        expert_cache = _resolve_expert_cache(model_dir)
+        if expert_cache is None:
+            raise FileNotFoundError(
+                "Expert features are enabled, but no saved expert cache was found in model_dir. "
+                "Expected either feature_manifest.json['expert_cache_file'] or expert_feature_cache.pkl."
+            )
+
+    # Load test dataset
     if args.use_expert_features:
         df_test = utility.common_load_parquet_dataset(data_path, columns=None, engine=args.engine)
     else:
-        needed = sorted(set(feature_cols + [args.row_id_col]))
+        must_have_cols = [args.row_id_col]
+        if args.invert_site0_meter0_to_kbtu:
+            must_have_cols += ["site_id", "meter"]
+        needed = sorted(set(feature_cols + must_have_cols))
         df_test = utility.common_load_parquet_dataset(data_path, columns=needed, engine=args.engine)
 
     if args.row_id_col not in df_test.columns:
@@ -249,42 +297,48 @@ def main() -> None:
             f"Ensure your test preprocessing keeps row_id for Kaggle submission alignment."
         )
 
-    # Attach expert features
+    # Attach expert features (now uses restored cache)
     if args.use_expert_features:
-        df_test = _attach_expert_features(df_test, label_col=args.label_col)
+        df_test = _attach_expert_features(
+            df_test, label_col=args.label_col, expert_cache=expert_cache
+        )  # changed :contentReference[oaicite:1]{index=1}
 
-    # Build model matrix matching training column order
     X_test = _build_feature_matrix(df_test, feature_cols=feature_cols, categorical_cols=categorical_cols)
 
-    # Choose iteration
-    num_iter: Optional[int]
     if args.num_iteration is not None and args.num_iteration > 0:
         num_iter = int(args.num_iteration)
     else:
         best_iter = getattr(booster, "best_iteration", 0) or 0
-        num_iter = int(best_iter) if best_iter > 0 else None  # None => all trees
+        num_iter = int(best_iter) if best_iter > 0 else None
 
-    # Predict
     pred = booster.predict(X_test, num_iteration=num_iter)
-
     if use_log1p:
         pred = np.expm1(pred)
-
     if args.clip_negative:
         pred = np.maximum(pred, 0.0)
 
-    # Kaggle submission format
-    sub = pd.DataFrame(
-        {
-            args.row_id_col: df_test[args.row_id_col].astype(np.int64),
-            args.label_col: pred.astype(np.float64),
-        }
-    ).sort_values(args.row_id_col)
+    # Optional: invert site0_meter0 predictions back to kBtu if needed (e.g. if model was trained on kWh but submission requires kBtu)
+    if args.invert_site0_meter0_to_kbtu:
+        missing = [c for c in ["site_id", "meter"] if c not in df_test.columns]
+        if missing:
+            raise KeyError(
+                f"Unit inversion enabled but missing columns {missing}. "
+                "Ensure your test preprocessing keeps site_id and meter."
+            )
+        mask = (df_test["site_id"] == 0) & (df_test["meter"] == 0)
+        pred = pred.copy()
+        pred[mask.to_numpy()] = pred[mask.to_numpy()] / float(args.kbtu_to_kwh)
 
+    sub = (
+        pd.DataFrame(
+            {args.row_id_col: df_test[args.row_id_col].astype(np.int64), args.label_col: pred.astype(np.float64)}
+        )
+        .sort_values(args.row_id_col)
+        .reset_index(drop=True)
+    )
     sub.to_csv(out_csv, index=False)
     print(
-        f"[OK] wrote submission: {out_csv}  rows={len(sub)}  "
-        f"use_expert={args.use_expert_features}  log1p={use_log1p}"
+        f"[OK] wrote submission: {out_csv}  rows={len(sub)}  use_expert={args.use_expert_features}  log1p={use_log1p}"
     )
 
 
