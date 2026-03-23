@@ -29,7 +29,7 @@ $RunArgs = @(
 #   "--tb-logdir", "E:\repos\LLM_traffic_query\tests\sumo_traci\tsb_3LR23LR2_2",
   "--tb-logdir", "E:\repos\LLM_traffic_query\tests\sumo_traci\tsb_22+22+_2",
 #   "--save-dir", "E:\repos\LLM_traffic_query\tests\sumo_traci\models_3LR23LR2",
-  "--save-dir", "E:\repos\LLM_traffic_query\tests\sumo_traci\models_22+22+_2",
+  "--save-dir", "E:\repos\LLM_traffic_query\tests\sumo_traci\models_all\models_22+22+_2",
   "--rollout-steps", "2048",
   "--ppo-epochs", "5",
   "--minibatch", "256",
