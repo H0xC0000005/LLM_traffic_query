@@ -206,6 +206,72 @@ class EvalTLSState:
     prev_in_control: bool = False
 
 
+@dataclass
+class EpisodeUniversalMetrics:
+    """Per-episode accumulators for universal evaluation metrics.
+
+    Definitions used here:
+      - average queue: time-average of the per-step mean queued vehicle count across lanes
+      - worst queue: time-average of the per-step maximum queued vehicle count across lanes
+      - throughput: total vehicles first observed on downstream lanes during control
+      - average waiting time: time-average of the per-step queue-weighted mean waiting
+        time among currently stopped/queued vehicles
+    """
+
+    step_count: int = 0
+    avg_queue_sum: float = 0.0
+    worst_queue_sum: float = 0.0
+    avg_waiting_time_sum: float = 0.0
+    worst_queue_peak: float = 0.0
+    throughput_total: float = 0.0
+
+    def update(self, scene_stats: Any, *, throughput_delta: float = 0.0) -> None:
+        per_lane = _scene_per_lane_map(scene_stats)
+        q = np.asarray(per_lane.get("queue_count", []), dtype=np.float32).reshape(-1)
+        w = np.asarray(per_lane.get("mean_wait_stopped_s", []), dtype=np.float32).reshape(-1)
+
+        if q.size == 0:
+            avg_queue = 0.0
+            worst_queue = 0.0
+            avg_waiting = 0.0
+        else:
+            avg_queue = float(q.mean())
+            worst_queue = float(q.max())
+            queued_total = float(q.sum())
+            if queued_total > 1e-6 and w.size == q.size:
+                avg_waiting = float(np.dot(w, q) / queued_total)
+            else:
+                avg_waiting = 0.0
+
+        self.step_count += 1
+        self.avg_queue_sum += avg_queue
+        self.worst_queue_sum += worst_queue
+        self.avg_waiting_time_sum += avg_waiting
+        self.worst_queue_peak = max(self.worst_queue_peak, worst_queue)
+        self.throughput_total += float(max(0.0, throughput_delta))
+
+    def as_dict(self, *, controlled_time_s: float) -> dict[str, float]:
+        denom = max(1, self.step_count)
+        ct = max(1e-6, float(controlled_time_s))
+        return {
+            "avg_queue_mean": float(self.avg_queue_sum / denom),
+            "worst_queue_mean": float(self.worst_queue_sum / denom),
+            "worst_queue_peak": float(self.worst_queue_peak),
+            "avg_waiting_time_s_mean": float(self.avg_waiting_time_sum / denom),
+            "throughput_total": float(self.throughput_total),
+            "throughput_veh_per_hour": float(self.throughput_total * 3600.0 / ct),
+            "metric_step_count": int(self.step_count),
+        }
+
+
+def _scene_per_lane_map(scene_stats: Any) -> dict[str, Any]:
+    if hasattr(scene_stats, "per_lane"):
+        return getattr(scene_stats, "per_lane")
+    if isinstance(scene_stats, dict) and "per_lane" in scene_stats:
+        return scene_stats["per_lane"]
+    raise TypeError("scene_stats must expose per_lane")
+
+
 def _parse_dim_list(s: str) -> List[int]:
     s = (s or "").strip()
     if not s:
@@ -261,8 +327,10 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
 
     if use_ppo:
         if ckpt_path is None or not ckpt_path.exists():
+            print(f"get ckpt path from args: {ckpt_path}, meta: {meta_path}")
             raise FileNotFoundError("--checkpoint is required and must exist when --controller-name ppo")
         if meta_path is None or not meta_path.exists():
+            print(f"get meta path from args: {meta_path}, or derived from ckpt: {meta_path}")
             raise FileNotFoundError("meta json is required for PPO evaluation")
     meta = _load_meta(meta_path)
 
@@ -391,6 +459,12 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
     ep_returns: List[float] = []
     ep_thr_norms: List[float] = []
     ep_q_rewards: List[float] = []
+    ep_avg_queue: List[float] = []
+    ep_worst_queue: List[float] = []
+    ep_worst_queue_peak: List[float] = []
+    ep_throughput_total: List[float] = []
+    ep_throughput_per_hour: List[float] = []
+    ep_avg_waiting_time: List[float] = []
 
     for ep in range(episodes):
         start_sumo(
@@ -434,6 +508,8 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
             thr_norm_sum = 0.0
             q_reward_sum = 0.0
             n_intervals = 0
+            universal_metrics = EpisodeUniversalMetrics()
+            last_seen_total = 0
 
             while True:
                 sim_t = float(traci.simulation.getTime())
@@ -441,6 +517,18 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
                 in_control = sim_t >= warmup_s
 
                 throughput_tracker_step(tls_id, cache_root)
+                seen_total = cache_root.get("_tp_seen_total", set())
+                current_seen_total = len(seen_total) if isinstance(seen_total, set) else int(len(seen_total))
+                throughput_delta_step = max(0, current_seen_total - int(last_seen_total))
+                last_seen_total = int(current_seen_total)
+
+                scene_stats = None
+                if in_control:
+                    scene_stats = collect_tsc_scene_snapshot(
+                        tls_id,
+                        cache=cache_root.setdefault("_scene", {}),
+                    )
+                    universal_metrics.update(scene_stats, throughput_delta=float(throughput_delta_step))
 
                 if tls_state.segment_end_time > 0.0 and sim_t >= tls_state.segment_end_time:
                     tls_state.segment_end_time = tls_advance_pending_segments(
@@ -452,10 +540,7 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
 
                 if done_episode:
                     if tls_state.prev_in_control and tls_state.prev_state is not None:
-                        scene_stats = collect_tsc_scene_snapshot(
-                            tls_id,
-                            cache=cache_root.setdefault("_scene", {}),
-                        )
+                        assert scene_stats is not None
                         s_next, _core_dim = encode_state_for_policy(
                             tls_id,
                             cache_root=cache_root,
@@ -476,9 +561,6 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
 
                         q_reward = reward_softmax_queue_from_encoded_state(
                             scene_stats=scene_stats,
-                            num_lanes=num_lanes,
-                            lane_block_size=4,
-                            queue_offset_in_block=0,
                             power=queue_power,
                             scale=queue_ref,
                             softmax_beta=5.0,
@@ -501,10 +583,7 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
                     break
 
                 if in_control and sim_t >= tls_state.next_decision_time:
-                    scene_stats = collect_tsc_scene_snapshot(
-                        tls_id,
-                        cache=cache_root.setdefault("_scene", {}),
-                    )
+                    assert scene_stats is not None
                     s_cur, _core_dim = encode_state_for_policy(
                         tls_id,
                         cache_root=cache_root,
@@ -526,9 +605,6 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
 
                         q_reward = reward_softmax_queue_from_encoded_state(
                             scene_stats=scene_stats,
-                            num_lanes=num_lanes,
-                            lane_block_size=4,
-                            queue_offset_in_block=0,
                             power=queue_power,
                             scale=queue_ref,
                             softmax_beta=5.0,
@@ -612,6 +688,14 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
 
             controlled_time_s = max(1e-6, float(episode_len_s - warmup_s))
             switch_rate_per_min = float(switches) / (controlled_time_s / 60.0)
+            metric_rec = universal_metrics.as_dict(controlled_time_s=controlled_time_s)
+
+            ep_avg_queue.append(float(metric_rec["avg_queue_mean"]))
+            ep_worst_queue.append(float(metric_rec["worst_queue_mean"]))
+            ep_worst_queue_peak.append(float(metric_rec["worst_queue_peak"]))
+            ep_throughput_total.append(float(metric_rec["throughput_total"]))
+            ep_throughput_per_hour.append(float(metric_rec["throughput_veh_per_hour"]))
+            ep_avg_waiting_time.append(float(metric_rec["avg_waiting_time_s_mean"]))
 
             rec = {
                 "type": "episode",
@@ -626,6 +710,18 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
                 "switches": int(switches),
                 "switch_rate_per_min": float(switch_rate_per_min),
             }
+            # universal metrics
+            rec.update(
+                {
+                    "avg_queue_mean": float(metric_rec["avg_queue_mean"]),
+                    "worst_queue_mean": float(metric_rec["worst_queue_mean"]),
+                    "worst_queue_peak": float(metric_rec["worst_queue_peak"]),
+                    "throughput_total": float(metric_rec["throughput_total"]),
+                    "throughput_veh_per_hour": float(metric_rec["throughput_veh_per_hour"]),
+                    "avg_waiting_time_s_mean": float(metric_rec["avg_waiting_time_s_mean"]),
+                    "metric_step_count": int(metric_rec["metric_step_count"]),
+                }
+            )
             if controller_name == "ppo":
                 mean_pi = (pi_sum / max(1, n_decisions)).tolist()
                 rec.update(
@@ -667,6 +763,10 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
                 f"[eval ep={ep}] controller={controller_name} return_sum={ret_sum:.4f} "
                 f"thr_norm_mean={ep_thr_norms[-1]:.4f} "
                 f"q_reward_mean={ep_q_rewards[-1]:.4f} "
+                f"avg_queue={ep_avg_queue[-1]:.3f} "
+                f"worst_queue={ep_worst_queue[-1]:.3f} "
+                f"throughput={ep_throughput_total[-1]:.1f} "
+                f"avg_wait={ep_avg_waiting_time[-1]:.3f} "
                 f"intervals={n_intervals}"
             )
 
@@ -679,6 +779,12 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
     arr_r = np.asarray(ep_returns, dtype=np.float32)
     arr_thr = np.asarray(ep_thr_norms, dtype=np.float32)
     arr_q = np.asarray(ep_q_rewards, dtype=np.float32)
+    arr_avg_queue = np.asarray(ep_avg_queue, dtype=np.float32)
+    arr_worst_queue = np.asarray(ep_worst_queue, dtype=np.float32)
+    arr_worst_queue_peak = np.asarray(ep_worst_queue_peak, dtype=np.float32)
+    arr_tp_total = np.asarray(ep_throughput_total, dtype=np.float32)
+    arr_tp_hour = np.asarray(ep_throughput_per_hour, dtype=np.float32)
+    arr_wait = np.asarray(ep_avg_waiting_time, dtype=np.float32)
 
     summary = {
         "controller_name": controller_name,
@@ -697,6 +803,18 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
         "thr_norm_mean_std": float(arr_thr.std()),
         "q_reward_mean_mean": float(arr_q.mean()),
         "q_reward_mean_std": float(arr_q.std()),
+        "avg_queue_mean": float(arr_avg_queue.mean()),
+        "avg_queue_std": float(arr_avg_queue.std()),
+        "worst_queue_mean": float(arr_worst_queue.mean()),
+        "worst_queue_std": float(arr_worst_queue.std()),
+        "worst_queue_peak_mean": float(arr_worst_queue_peak.mean()),
+        "worst_queue_peak_std": float(arr_worst_queue_peak.std()),
+        "throughput_total_mean": float(arr_tp_total.mean()),
+        "throughput_total_std": float(arr_tp_total.std()),
+        "throughput_veh_per_hour_mean": float(arr_tp_hour.mean()),
+        "throughput_veh_per_hour_std": float(arr_tp_hour.std()),
+        "avg_waiting_time_s_mean": float(arr_wait.mean()),
+        "avg_waiting_time_s_std": float(arr_wait.std()),
     }
 
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
@@ -718,6 +836,12 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
     print(f"return_sum: mean={arr_r.mean():.4f} std={arr_r.std():.4f}")
     print(f"thr_norm_mean: mean={arr_thr.mean():.4f} std={arr_thr.std():.4f}")
     print(f"q_reward_mean: mean={arr_q.mean():.4f} std={arr_q.std():.4f}")
+    print(f"avg_queue_mean: mean={arr_avg_queue.mean():.4f} std={arr_avg_queue.std():.4f}")
+    print(f"worst_queue_mean: mean={arr_worst_queue.mean():.4f} std={arr_worst_queue.std():.4f}")
+    print(f"worst_queue_peak: mean={arr_worst_queue_peak.mean():.4f} std={arr_worst_queue_peak.std():.4f}")
+    print(f"throughput_total: mean={arr_tp_total.mean():.4f} std={arr_tp_total.std():.4f}")
+    print(f"throughput_veh_per_hour: mean={arr_tp_hour.mean():.4f} std={arr_tp_hour.std():.4f}")
+    print(f"avg_waiting_time_s_mean: mean={arr_wait.mean():.4f} std={arr_wait.std():.4f}")
 
 
 def main() -> None:
