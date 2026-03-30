@@ -14,7 +14,7 @@ import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Deque, Dict, List, Optional, Tuple
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 from collections import deque
 
 import numpy as np
@@ -22,10 +22,7 @@ import torch
 import libsumo as traci
 
 from ppo_agent import PPOAgent
-from scene_encoder import (
-    encode_tsc_state_vector_bounded_v2,
-)
-from expert_feature_extractor import tsc_isolated_intersection_feature_vector
+from encoder_registry import available_encoder_names, resolve_encoder
 from utility import (
     start_sumo,
     tls_major_action_dim,
@@ -38,53 +35,77 @@ from utility import (
     reward_softmax_queue_from_encoded_state,
 )
 from controller_registry import make_controller, list_controllers
-
-# try:
-#     # Newer portable scene path if available in the active repo.
-#     from utility import collect_tsc_scene_snapshot  # type: ignore[attr-defined]
-# except Exception:
-#     # Fallback to the standalone portable snapshot module generated during refactor.
 from scene_encoder import collect_tsc_scene_snapshot
 
 
 # ------------------------------
-# Encoder selection (by meta["encoder"])
+# Encoder selection (via registry + model meta)
 # ------------------------------
-def _encode_core(
-    tls_id: str,
-    *,
-    cache: Dict[str, Any],
-    encoder_name: str,
-    scene_stats: Any | None = None,
-) -> np.ndarray:
-    # Keep this mapping small and explicit to avoid surprises.
-    if encoder_name == "encode_tsc_state_vector_bounded_v2":
-        kwargs: dict[str, Any] = {
-            "moving_speed_threshold": 0.1,
-            "stopped_speed_threshold": 0.1,
-            "cache": cache,
-        }
-        if scene_stats is not None:
-            kwargs["scene_stats"] = scene_stats
-        return encode_tsc_state_vector_bounded_v2(
-            tls_id,
+def _encoder_name_is_none(name: str | None) -> bool:
+    return str(name or "").strip().lower() in {"", "none", "null"}
+
+
+def make_combined_encoder(core_encoder_fn, addon_encoder_fn=None):
+    """Mirror training-time encoder composition and cache layout."""
+
+    def encoder_fn(
+        tls_id: str,
+        *,
+        scene_stats,
+        cache: dict | None = None,
+        **kwargs,
+    ) -> np.ndarray:
+        if cache is None:
+            cache = {}
+
+        core_cache = cache.setdefault("_enc_core", {})
+        v_core = core_encoder_fn(
+            tls_id=tls_id,
+            scene_stats=scene_stats,
+            cache=core_cache,
             **kwargs,
-        ).astype(np.float32)
+        )
+        v_core = np.asarray(v_core, dtype=np.float32)
+        core_cache["_last_v_core"] = v_core
 
-    raise ValueError(f"unknown encoder_name: {encoder_name}")
+        if addon_encoder_fn is None:
+            return v_core
+
+        addon_cache = cache.setdefault("_enc_addon", {})
+        v_add = addon_encoder_fn(
+            tls_id=tls_id,
+            scene_stats=scene_stats,
+            cache=addon_cache,
+            **kwargs,
+        )
+        v_add = np.asarray(v_add, dtype=np.float32)
+        addon_cache["_last_v_addon"] = v_add
+
+        return np.concatenate([v_core, v_add], axis=0)
+
+    return encoder_fn
 
 
-def _fit_tail_dim(x: np.ndarray, target_dim: int) -> np.ndarray:
-    x = np.asarray(x, dtype=np.float32).reshape(-1)
-    if x.size == target_dim:
-        return x
-    if x.size > target_dim:
-        # keep prefix if your expert extractor preserves order;
-        # if semantics changed, better to raise instead.
-        return x[:target_dim].astype(np.float32)
-    # pad with zeros
-    out = np.zeros((target_dim,), dtype=np.float32)
-    out[: x.size] = x
+def _apply_vector_ablation(
+    x: np.ndarray,
+    *,
+    zero_all: bool,
+    zero_dims: List[int],
+    noise_dims: List[int],
+    noise_sigma: float,
+) -> np.ndarray:
+    out = np.asarray(x, dtype=np.float32).reshape(-1).copy()
+    if zero_all:
+        out[:] = 0.0
+        return out
+
+    for d in zero_dims:
+        if 0 <= d < out.shape[0]:
+            out[d] = 0.0
+    if noise_sigma > 0.0:
+        for d in noise_dims:
+            if 0 <= d < out.shape[0]:
+                out[d] += np.random.normal(0.0, noise_sigma)
     return out
 
 
@@ -92,92 +113,60 @@ def encode_state_for_policy(
     tls_id: str,
     *,
     cache_root: Dict[str, Any],
-    meta_encoder_name: str,
-    use_expert_features: bool,
+    encoder_fn: Callable[..., np.ndarray],
+    addon_encoder_name: str,
     zero_expert_features: bool,
     zero_expert_dims: List[int],
     noise_expert_dims: List[int],
     noise_sigma: float,
     expected_state_dim: Optional[int] = None,
-    expected_expert_dim: Optional[int] = None,
     scene_stats: Any | None = None,
-) -> Tuple[np.ndarray, int]:
-    if use_expert_features:
-        core_cache = cache_root.setdefault("_enc_core", {})
-
-        core = _encode_core(
+) -> np.ndarray:
+    state = np.asarray(
+        encoder_fn(
             tls_id,
-            cache=core_cache,
-            encoder_name=meta_encoder_name,
             scene_stats=scene_stats,
+            moving_speed_threshold=0.1,
+            stopped_speed_threshold=0.1,
+            cache=cache_root,
+        ),
+        dtype=np.float32,
+    ).reshape(-1)
+
+    wants_expert_ablation = bool(zero_expert_features or zero_expert_dims or noise_expert_dims)
+    addon_name_norm = str(addon_encoder_name).strip().lower()
+    if wants_expert_ablation:
+        if addon_name_norm != "expert":
+            raise ValueError(
+                "Expert-feature ablation/noise is only supported when addon_encoder_name='expert'. "
+                f"Got addon_encoder_name={addon_encoder_name!r}."
+            )
+
+        core = np.asarray(cache_root.get("_enc_core", {}).get("_last_v_core", []), dtype=np.float32).reshape(-1)
+        addon = np.asarray(cache_root.get("_enc_addon", {}).get("_last_v_addon", []), dtype=np.float32).reshape(-1)
+        if addon.size == 0:
+            raise RuntimeError(
+                "Expert addon encoder produced no cached addon vector; cannot apply expert ablation/noise."
+            )
+
+        addon = _apply_vector_ablation(
+            addon,
+            zero_all=bool(zero_expert_features),
+            zero_dims=zero_expert_dims,
+            noise_dims=noise_expert_dims,
+            noise_sigma=float(noise_sigma),
         )
-        core_dim = int(core.shape[0])
+        state = np.concatenate([core, addon], axis=0).astype(np.float32)
 
-        # derive expected expert dim from meta/checkpoint if available
-        if expected_expert_dim is None:
-            if expected_state_dim is not None:
-                expected_expert_dim = int(expected_state_dim) - core_dim
-            else:
-                # fallback: use runtime extractor size (least preferred)
-                expected_expert_dim = int(
-                    np.asarray(tsc_isolated_intersection_feature_vector(tls_id), dtype=np.float32).size
-                )
+    if expected_state_dim is not None and state.size != int(expected_state_dim):
+        raise ValueError(f"Final state size mismatch: got {state.size}, expected {expected_state_dim}")
 
-        if expected_expert_dim < 0:
-            raise ValueError(
-                f"Invalid dims: expected_state_dim={expected_state_dim}, core_dim={core_dim}, "
-                f"derived expert_dim={expected_expert_dim}"
-            )
-
-        # Optional strict compatibility check for core dim
-        if expected_state_dim is not None and (core_dim + expected_expert_dim) != int(expected_state_dim):
-            raise ValueError(
-                f"State dim mismatch before expert assembly: core_dim={core_dim}, "
-                f"expected_expert_dim={expected_expert_dim}, expected_state_dim={expected_state_dim}"
-            )
-
-        if zero_expert_features:
-            expert = np.zeros((expected_expert_dim,), dtype=np.float32)
-        else:
-            expert_raw = np.asarray(tsc_isolated_intersection_feature_vector(tls_id), dtype=np.float32)
-            expert = _fit_tail_dim(expert_raw, expected_expert_dim)
-
-            # granular ablation on the fitted expert vector
-            if expert.size > 0:
-                for d in zero_expert_dims:
-                    if 0 <= d < expert.shape[0]:
-                        expert[d] = 0.0
-                if noise_sigma > 0 and len(noise_expert_dims) > 0:
-                    for d in noise_expert_dims:
-                        if 0 <= d < expert.shape[0]:
-                            expert[d] += np.random.normal(0.0, noise_sigma)
-
-        state = np.concatenate([core, expert], axis=0).astype(np.float32)
-
-        if expected_state_dim is not None and state.size != int(expected_state_dim):
-            raise ValueError(
-                f"Final state size mismatch: got {state.size}, expected {expected_state_dim} "
-                f"(core={core_dim}, expert={expert.size})"
-            )
-
-        return state, core_dim
-
-    # core-only path
-    core = _encode_core(
-        tls_id,
-        cache=cache_root,
-        encoder_name=meta_encoder_name,
-        scene_stats=scene_stats,
-    )
-    if expected_state_dim is not None and core.size != int(expected_state_dim):
-        raise ValueError(f"Core-only state size mismatch: got {core.size}, expected {expected_state_dim}")
-    return core.astype(np.float32), int(core.shape[0])
+    return state
 
 
-def get_num_lanes_from_cache(cache_root: Dict[str, Any], use_expert_features: bool) -> int:
-    if use_expert_features:
-        lane_ids = cache_root.get("_enc_core", {}).get("lane_ids", [])
-    else:
+def get_num_lanes_from_cache(cache_root: Dict[str, Any]) -> int:
+    lane_ids = cache_root.get("_enc_core", {}).get("lane_ids", [])
+    if not lane_ids:
         lane_ids = cache_root.get("lane_ids", [])
     return max(1, len(lane_ids))
 
@@ -312,6 +301,16 @@ def _build_controller(args: argparse.Namespace):
             clip_occ=float(args.mp_clip_occ),
             tie_break_current=bool(args.mp_tie_break_current),
         )
+    if name == "webster" or name == "fixed_time":
+        controller = make_controller(
+            "webster",
+            min_major_green_s=5.0,
+            demand_key="count_ratio_norm",
+            cycle_min_s=40.0,
+            cycle_max_s=140.0,
+            startup_lost_per_phase_s=2.0,
+        )
+        return controller
     known = ", ".join(["ppo", *list_controllers()])
     raise ValueError(f"unknown controller_name={args.controller_name!r}. known: {known}")
 
@@ -319,7 +318,6 @@ def _build_controller(args: argparse.Namespace):
 def eval_one_checkpoint(args: argparse.Namespace) -> None:
     controller_name = str(args.controller_name).strip().lower()
     use_ppo = controller_name == "ppo"
-
     ckpt_path: Path | None = Path(args.checkpoint) if args.checkpoint else None
     meta_path: Path | None = (
         Path(args.meta) if args.meta is not None else (ckpt_path.with_suffix(".json") if ckpt_path else None)
@@ -344,7 +342,11 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
     layer_count = 2
     use_skip = False
     use_expert_features = False
-    encoder_name = str(meta.get("encoder", args.encoder_name or "encode_tsc_state_vector_bounded_v2"))
+    core_encoder_name = str(getattr(args, "core_encoder_name", "bounded_v2") or "bounded_v2").strip()
+    deprecated_encoder_name = getattr(args, "encoder_name", None)
+    if deprecated_encoder_name is not None:
+        core_encoder_name = str(deprecated_encoder_name).strip()
+    addon_encoder_name = str(getattr(args, "addon_encoder_name", "none") or "none").strip()
 
     if use_ppo:
         ckpt = torch.load(str(ckpt_path), map_location=device)
@@ -353,10 +355,16 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
         state_dim = int(meta["state_dim"])
         action_dim_meta = int(meta["action_dim"])
         hidden_dim = int(meta.get("hidden_dim", 256))
-        expert_feature_dim = int(meta.get("expert_dim", 0)) if bool(meta.get("use_expert_features", False)) else 0
+        expert_feature_dim = int(meta.get("expert_dim", 0))
         layer_count = int(meta.get("layer_count", 2))
         use_skip = bool(meta.get("use_skip", False))
         use_expert_features = bool(meta.get("use_expert_features", False))
+        core_encoder_name = str(meta.get("core_encoder_name", "")).strip()
+        if not core_encoder_name:
+            raise KeyError(
+                "meta json missing 'core_encoder_name'; PPO evaluation requires registry-based encoder metadata."
+            )
+        addon_encoder_name = str(meta.get("addon_encoder_name", "none") or "none").strip()
 
         agent = PPOAgent(
             state_dim=state_dim,
@@ -390,14 +398,31 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
         raise ValueError("sumocfg not found in meta, and --sumocfg not provided")
 
     print(f"> Using controller: {controller_name}")
-    print(f"> Using encoder: {encoder_name}")
-    print(f"> Using expert features: {use_expert_features}")
+    print(f"> Using core encoder: {core_encoder_name}")
+    print(f"> Using addon encoder: {addon_encoder_name}")
+    print(f"> Using expert features(meta): {use_expert_features}")
 
     # eval knobs
     episodes = int(args.episodes)
     episode_len_s = float(args.episode_len)
     warmup_s = float(args.warmup)
     action_hold_s = float(args.hold) if args.hold is not None else float(meta.get("action_hold_s", 10.0))
+
+    core_encoder_fn = resolve_encoder(
+        core_encoder_name,
+        min_major_green_s=action_hold_s,
+    )
+    addon_encoder_fn = None
+    if not _encoder_name_is_none(addon_encoder_name):
+        addon_encoder_fn = resolve_encoder(
+            addon_encoder_name,
+            min_major_green_s=action_hold_s,
+        )
+    policy_encoder_fn = make_combined_encoder(
+        core_encoder_fn=core_encoder_fn,
+        addon_encoder_fn=addon_encoder_fn,
+    )
+    zero_expert_active = bool(args.zero_expert) and str(addon_encoder_name).strip().lower() == "expert"
 
     sumo_seed_base = int(args.sumo_seed) if args.sumo_seed is not None else int(meta.get("sumo_seed", 0))
     traffic_scale = (
@@ -413,6 +438,8 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
     queue_power = float(args.queue_power)
     r_clip_lo = float(args.reward_clip_lo)
     r_clip_hi = float(args.reward_clip_hi)
+    # [NEW] base interval for right-endpoint interval scaling
+    base_interval_s = max(1e-6, float(action_hold_s))
 
     # ablation: only makes sense if checkpoint expects expert features
     zero_expert = bool(args.zero_expert)
@@ -429,7 +456,7 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
 
     ts = int(time.time())
     tag = f"__{args.log_tag}" if args.log_tag else ""
-    mode = "zeroexp" if (args.zero_expert and use_expert_features and use_ppo) else controller_name
+    mode = "zeroexp" if zero_expert_active else controller_name
     run_name = str(meta.get("run_name", "run" if use_ppo else controller_name))
     base = f"eval_{run_name}__{tls_id}__{mode}{tag}__{ts}"
     jsonl_path = log_dir / f"{base}.jsonl"
@@ -444,8 +471,10 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
         "sumocfg": sumocfg,
         "episodes": int(args.episodes),
         "deterministic": bool(args.deterministic),
+        "core_encoder_name": core_encoder_name,
+        "addon_encoder_name": addon_encoder_name,
         "use_expert_features_meta": bool(use_expert_features),
-        "zero_expert_eval": bool(args.zero_expert),
+        "zero_expert_eval": bool(zero_expert_active),
         "traffic_scale": float(traffic_scale),
         "sumo_seed_base": int(sumo_seed_base),
         "zero_expert_dims": zero_dims,
@@ -541,20 +570,18 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
                 if done_episode:
                     if tls_state.prev_in_control and tls_state.prev_state is not None:
                         assert scene_stats is not None
-                        s_next, _core_dim = encode_state_for_policy(
+                        s_next = encode_state_for_policy(
                             tls_id,
                             cache_root=cache_root,
-                            meta_encoder_name=encoder_name,
-                            use_expert_features=use_expert_features,
-                            zero_expert_features=zero_expert and use_expert_features,
+                            encoder_fn=policy_encoder_fn,
+                            addon_encoder_name=addon_encoder_name,
+                            zero_expert_features=zero_expert_active,
                             zero_expert_dims=zero_dims,
                             noise_expert_dims=noise_dims,
                             noise_sigma=noise_sigma,
                             expected_state_dim=state_dim,
-                            expected_expert_dim=expert_feature_dim,
                             scene_stats=scene_stats,
                         )
-                        num_lanes = get_num_lanes_from_cache(cache_root, use_expert_features)
 
                         thr = reward_throughput_per_second_on_decision(sim_time=sim_t, cache=cache_root)
                         thr_norm = min(1.0, max(0.0, float(thr) / max(1e-6, throughput_ref)))
@@ -584,20 +611,18 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
 
                 if in_control and sim_t >= tls_state.next_decision_time:
                     assert scene_stats is not None
-                    s_cur, _core_dim = encode_state_for_policy(
+                    s_cur = encode_state_for_policy(
                         tls_id,
                         cache_root=cache_root,
-                        meta_encoder_name=encoder_name,
-                        use_expert_features=use_expert_features,
-                        zero_expert_features=zero_expert and use_expert_features,
+                        encoder_fn=policy_encoder_fn,
+                        addon_encoder_name=addon_encoder_name,
+                        zero_expert_features=zero_expert_active,
                         zero_expert_dims=zero_dims,
                         noise_expert_dims=noise_dims,
                         noise_sigma=noise_sigma,
                         expected_state_dim=state_dim,
-                        expected_expert_dim=expert_feature_dim,
                         scene_stats=scene_stats,
                     )
-                    num_lanes = get_num_lanes_from_cache(cache_root, use_expert_features)
 
                     if tls_state.prev_in_control and tls_state.prev_state is not None:
                         thr = reward_throughput_per_second_on_decision(sim_time=sim_t, cache=cache_root)
@@ -792,8 +817,10 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
         "meta": str(meta_path) if meta_path else None,
         "tls_id": tls_id,
         "sumocfg": sumocfg,
+        "core_encoder_name": core_encoder_name,
+        "addon_encoder_name": addon_encoder_name,
         "use_expert_features_meta": bool(use_expert_features),
-        "zero_expert_eval": bool(zero_expert and use_expert_features),
+        "zero_expert_eval": bool(zero_expert_active),
         "episodes": int(episodes),
         "traffic_scale": float(traffic_scale),
         "sumo_seed_base": int(sumo_seed_base),
@@ -828,8 +855,10 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
     print(f"meta:       {meta_path}")
     print(f"tls_id:     {tls_id}")
     print(f"sumocfg:    {sumocfg}")
+    print(f"core_encoder_name: {core_encoder_name}")
+    print(f"addon_encoder_name: {addon_encoder_name}")
     print(f"use_expert_features(meta): {use_expert_features}")
-    print(f"zero_expert_features(eval): {zero_expert and use_expert_features}")
+    print(f"zero_expert_features(eval): {zero_expert_active}")
     print(f"episodes:   {episodes}")
     print(f"traffic_scale: {traffic_scale}")
     print(f"sumo_seed_base: {sumo_seed_base}")
@@ -900,12 +929,26 @@ def main() -> None:
         help="Use greedy action selection for PPO (recommended)",
     )
 
-    # encoder override for non-PPO evaluation or explicit metric encoder choice
+    # encoder override for non-PPO evaluation (PPO uses meta core/addon encoder names)
+    ap.add_argument(
+        "--core-encoder-name",
+        type=str,
+        default="bounded_v2",
+        choices=available_encoder_names(),
+        help="Core encoder registry name used when PPO meta is unavailable.",
+    )
+    ap.add_argument(
+        "--addon-encoder-name",
+        type=str,
+        default="none",
+        choices=["none", *available_encoder_names()],
+        help="Optional addon encoder registry name used when PPO meta is unavailable.",
+    )
     ap.add_argument(
         "--encoder-name",
         type=str,
-        default="encode_tsc_state_vector_bounded_v2",
-        help="State encoder used to compute evaluation-side queue metrics when no PPO meta is present.",
+        default=None,
+        help="Deprecated alias for --core-encoder-name. Must still be a registry encoder name.",
     )
 
     # expert ablation (PPO only)
