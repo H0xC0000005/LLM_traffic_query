@@ -593,7 +593,14 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
                             softmax_beta=5.0,
                             clip_nonnegative=True,
                         )
-                        r = float(w_thr) * thr_norm + float(w_q) * float(q_reward)
+                        # [NEW] right-endpoint interval scaling
+                        dt_interval = max(1e-6, float(sim_t - tls_state.action_start_time))
+                        interval_scale = float(dt_interval / base_interval_s)
+                        thr_term = float(thr_norm) * interval_scale
+                        q_term = float(q_reward) * interval_scale
+
+                        # r = float(w_thr) * thr_norm + float(w_q) * float(q_reward)
+                        r = float(w_thr) * thr_term + float(w_q) * q_term
                         r = clip_reward(r, r_clip_lo, r_clip_hi)
 
                         ret_sum += float(r)
@@ -635,7 +642,14 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
                             softmax_beta=5.0,
                             clip_nonnegative=True,
                         )
-                        r = float(w_thr) * thr_norm + float(w_q) * float(q_reward)
+                        # [NEW] right-endpoint interval scaling
+                        dt_interval = max(1e-6, float(sim_t - tls_state.action_start_time))
+                        interval_scale = float(dt_interval / base_interval_s)
+                        thr_term = float(thr_norm) * interval_scale
+                        q_term = float(q_reward) * interval_scale
+
+                        # r = float(w_thr) * thr_norm + float(w_q) * float(q_reward)
+                        r = float(w_thr) * thr_term + float(w_q) * q_term
                         r = clip_reward(r, r_clip_lo, r_clip_hi)
 
                         ret_sum += float(r)
