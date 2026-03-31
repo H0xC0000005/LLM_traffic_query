@@ -10,21 +10,22 @@ Set-Location $WorkDir
 # -----------------------------
 # Select reward here
 # -----------------------------
-$RewardName = "universal_v2"   # "universal_v2" | "queue" | "pressure"
+$RewardName = "queue"   # "universal_v2" | "queue" | "pressure" | "unbiased_simple_v1"
 
 # -----------------------------
 # Select encoder composition here
 # -----------------------------
 # "adlight_state" "frap_state"
 $CoreEncoderName  = "bounded_v2"   # "bounded_v2" | "pressure_state" | "ats"
-$AddonEncoderName = "frap_state"         # "none" | "expert" | "pressure_state" | "ats"
+$AddonEncoderName = "expert"         # "none" | "expert" | "pressure_state" | "ats"
 
 # -----------------------------
 # Common PPO / scenario args
 # -----------------------------
 $RunArgs = @(
-    # "E:\Sumo\sumo_maps\4leg_22+22+\4leg_22+22+.sumocfg", 
-  "-c", "E:\Sumo\sumo_maps\4leg_3LR23LR2\4leg_3LR23LR2.sumocfg",
+    # "E:\Sumo\sumo_maps\4leg_22+22+\4leg_22+22+.sumocfg", "E:\Sumo\sumo_maps\4leg_3LR23LR2\4leg_3LR23LR2.sumocfg",
+    # "E:\Sumo\sumo_maps\4leg_3232skewed\4leg_3232skewed.sumocfg",
+  "-c", "E:\Sumo\sumo_maps\4leg_3232skewed\4leg_3232skewed.sumocfg",
   "--max-time", "6000000",
   "--episode-len", "7200",
   "--warmup", "100",
@@ -41,8 +42,12 @@ $RunArgs = @(
   "--critic-lr", "0.0001",
   "--traffic-scale-mean", "1.0",
   "--traffic-scale-std", "0.05",
-  "--tb-logdir", "E:\repos\LLM_traffic_query\tests\sumo_traci\tensorboard_logs_all\tsb_3LR23LR2_4",
-  "--save-dir", "E:\repos\LLM_traffic_query\tests\sumo_traci\models_all\models_3LR23LR2\4",
+  # "E:\repos\LLM_traffic_query\tests\sumo_traci\tensorboard_logs_all\tsb_3232skewed_2",
+  # "E:\repos\LLM_traffic_query\tests\sumo_traci\tensorboard_logs_all\tsb_3LR23LR2_5",
+  "--tb-logdir", "E:\repos\LLM_traffic_query\tests\sumo_traci\tensorboard_logs_all\tsb_3232skewed_2",
+  # "E:\repos\LLM_traffic_query\tests\sumo_traci\models_all\models_3232skewed_2",
+  # "E:\repos\LLM_traffic_query\tests\sumo_traci\models_all\models_3LR23LR2\5",
+  "--save-dir", "E:\repos\LLM_traffic_query\tests\sumo_traci\models_all\models_3232skewed_2",
   "--rollout-steps", "2048",
   "--ppo-epochs", "5",
   "--minibatch", "256",
@@ -108,6 +113,24 @@ switch ($RewardName) {
     $RewardTag = "reward_pressure"
   }
 
+  "unbiased_simple_v1" {
+    $RewardArgs += @(
+      "--thr-ref", "2.00",
+      "--queue-ref", "1.0",
+      "--w-thr", "0.90",
+      "--w-queue", "0.70",
+      "--w-wait", "1.0",
+      "--wait-ref", "40",
+      "--wait-barrier-start", "10",
+      "--softmax-wait-beta", "5",
+      "--softmax-queue-beta", "3.0",
+      "--queue-power", "1.0",
+      "--reward-clip-lo", "-5.0",
+      "--reward-clip-hi", "5.0"
+    )
+    $RewardTag = "reward_unbiased_simple_v1"
+  }
+
   default {
     throw "Unsupported reward name: $RewardName"
   }
@@ -124,7 +147,7 @@ if ($AddonEncoderName -ne "none") {
 # -----------------------------
 # Log tag
 # -----------------------------
-$LogTag = "base__${EncoderTag}_${RewardTag}"
+$LogTag = "exp_r_q_ub_${EncoderTag}_${RewardTag}"
 
 $RunArgs += $RewardArgs
 $RunArgs += @("--log-tag", $LogTag)

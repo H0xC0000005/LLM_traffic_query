@@ -33,6 +33,7 @@ from utility import (
     throughput_tracker_step,
     reward_throughput_per_second_on_decision,
     reward_softmax_queue_from_encoded_state,
+    reward_softmax_wait_barrier_from_encoded_state_v2,
 )
 from controller_registry import make_controller, list_controllers
 from scene_encoder import collect_tsc_scene_snapshot
@@ -438,8 +439,16 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
     queue_power = float(args.queue_power)
     r_clip_lo = float(args.reward_clip_lo)
     r_clip_hi = float(args.reward_clip_hi)
+    # hardcoded reward shaping knobs (wait term)
+    w_wait = float(args.w_wait)
+    wait_ref_s = 60.0
+    wait_barrier_start_s = 20.0
+    softmax_queue_beta = 3.0
+    softmax_wait_beta = 5.0
+    wait_barrier_power = 1.0
     # [NEW] base interval for right-endpoint interval scaling
     base_interval_s = max(1e-6, float(action_hold_s))
+    print(f">>> Using reward weights: w_thr={w_thr}, w_q={w_q}, w_wait={w_wait}")
 
     # ablation: only makes sense if checkpoint expects expert features
     zero_expert = bool(args.zero_expert)
@@ -488,6 +497,7 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
     ep_returns: List[float] = []
     ep_thr_norms: List[float] = []
     ep_q_rewards: List[float] = []
+    ep_wait_rewards: List[float] = []
     ep_avg_queue: List[float] = []
     ep_worst_queue: List[float] = []
     ep_worst_queue_peak: List[float] = []
@@ -525,6 +535,8 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
             pi_min_sum = 0.0
             pi_max_sum = 0.0
             n_decisions = 0
+            wait_reward_sum = 0.0
+            a_wait_sum = np.zeros((action_dim,), dtype=np.float64)
             a_interval_count = np.zeros((action_dim,), dtype=np.int32)
             a_reward_sum = np.zeros((action_dim,), dtype=np.float64)
             a_thr_sum = np.zeros((action_dim,), dtype=np.float64)
@@ -593,19 +605,29 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
                             softmax_beta=5.0,
                             clip_nonnegative=True,
                         )
+                        wait_reward = reward_softmax_wait_barrier_from_encoded_state_v2(
+                            scene_stats=scene_stats,
+                            wait_ref_s=wait_ref_s,
+                            barrier_start_s=wait_barrier_start_s,
+                            softmax_beta=softmax_wait_beta,
+                            barrier_power=wait_barrier_power,
+                        )
+
                         # [NEW] right-endpoint interval scaling
                         dt_interval = max(1e-6, float(sim_t - tls_state.action_start_time))
                         interval_scale = float(dt_interval / base_interval_s)
                         thr_term = float(thr_norm) * interval_scale
                         q_term = float(q_reward) * interval_scale
+                        wait_term = float(wait_reward) * interval_scale
 
                         # r = float(w_thr) * thr_norm + float(w_q) * float(q_reward)
-                        r = float(w_thr) * thr_term + float(w_q) * q_term
+                        r = float(w_thr) * thr_term + float(w_q) * q_term + float(w_wait) * wait_term
                         r = clip_reward(r, r_clip_lo, r_clip_hi)
 
                         ret_sum += float(r)
                         thr_norm_sum += float(thr_norm)
                         q_reward_sum += float(q_reward)
+                        wait_reward_sum += float(wait_term)
                         n_intervals += 1
 
                         if tls_state.prev_action is not None:
@@ -614,6 +636,7 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
                             a_reward_sum[pa] += float(r)
                             a_thr_sum[pa] += float(thr_norm)
                             a_q_sum[pa] += float(q_reward)
+                            a_wait_sum[pa] += float(wait_term)
                     break
 
                 if in_control and sim_t >= tls_state.next_decision_time:
@@ -642,19 +665,28 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
                             softmax_beta=5.0,
                             clip_nonnegative=True,
                         )
+                        wait_reward = reward_softmax_wait_barrier_from_encoded_state_v2(
+                            scene_stats=scene_stats,
+                            wait_ref_s=wait_ref_s,
+                            barrier_start_s=wait_barrier_start_s,
+                            softmax_beta=softmax_wait_beta,
+                            barrier_power=wait_barrier_power,
+                        )
                         # [NEW] right-endpoint interval scaling
                         dt_interval = max(1e-6, float(sim_t - tls_state.action_start_time))
                         interval_scale = float(dt_interval / base_interval_s)
                         thr_term = float(thr_norm) * interval_scale
                         q_term = float(q_reward) * interval_scale
+                        wait_term = float(wait_reward) * interval_scale
 
                         # r = float(w_thr) * thr_norm + float(w_q) * float(q_reward)
-                        r = float(w_thr) * thr_term + float(w_q) * q_term
+                        r = float(w_thr) * thr_term + float(w_q) * q_term + float(w_wait) * wait_term
                         r = clip_reward(r, r_clip_lo, r_clip_hi)
 
                         ret_sum += float(r)
                         thr_norm_sum += float(thr_norm)
                         q_reward_sum += float(q_reward)
+                        wait_reward_sum += float(wait_term)
                         n_intervals += 1
 
                         if tls_state.prev_action is not None:
@@ -663,6 +695,7 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
                             a_reward_sum[pa] += float(r)
                             a_thr_sum[pa] += float(thr_norm)
                             a_q_sum[pa] += float(q_reward)
+                            a_wait_sum[pa] += float(wait_term)
                     else:
                         _ = reward_throughput_per_second_on_decision(sim_time=sim_t, cache=cache_root)
 
@@ -724,6 +757,7 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
             ep_returns.append(float(ret_sum))
             ep_thr_norms.append(float(thr_norm_sum / max(1, n_intervals)))
             ep_q_rewards.append(float(q_reward_sum / max(1, n_intervals)))
+            ep_wait_rewards.append(float(wait_reward_sum / max(1, n_intervals)))
 
             controlled_time_s = max(1e-6, float(episode_len_s - warmup_s))
             switch_rate_per_min = float(switches) / (controlled_time_s / 60.0)
@@ -744,6 +778,7 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
                 "return_sum": float(ret_sum),
                 "thr_norm_mean": float(thr_norm_sum / max(1, n_intervals)),
                 "q_reward_mean": float(q_reward_sum / max(1, n_intervals)),
+                "wait_reward_mean": float(wait_reward_sum / max(1, n_intervals)),
                 "n_intervals": int(n_intervals),
                 "action_counts": action_counts.tolist(),
                 "switches": int(switches),
@@ -793,6 +828,7 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
                     "a_reward_mean": (a_reward_sum / a_denom).tolist(),
                     "a_thr_norm_mean": (a_thr_sum / a_denom).tolist(),
                     "a_q_reward_mean": (a_q_sum / a_denom).tolist(),
+                    "a_wait_reward_mean": (a_wait_sum / a_denom).tolist(),
                 }
             )
 
@@ -802,6 +838,7 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
                 f"[eval ep={ep}] controller={controller_name} return_sum={ret_sum:.4f} "
                 f"thr_norm_mean={ep_thr_norms[-1]:.4f} "
                 f"q_reward_mean={ep_q_rewards[-1]:.4f} "
+                f"wait_reward_mean={ep_wait_rewards[-1]:.4f} "
                 f"avg_queue={ep_avg_queue[-1]:.3f} "
                 f"worst_queue={ep_worst_queue[-1]:.3f} "
                 f"throughput={ep_throughput_total[-1]:.1f} "
@@ -818,6 +855,7 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
     arr_r = np.asarray(ep_returns, dtype=np.float32)
     arr_thr = np.asarray(ep_thr_norms, dtype=np.float32)
     arr_q = np.asarray(ep_q_rewards, dtype=np.float32)
+    arr_wait_reward = np.asarray(ep_wait_rewards, dtype=np.float32)
     arr_avg_queue = np.asarray(ep_avg_queue, dtype=np.float32)
     arr_worst_queue = np.asarray(ep_worst_queue, dtype=np.float32)
     arr_worst_queue_peak = np.asarray(ep_worst_queue_peak, dtype=np.float32)
@@ -844,6 +882,8 @@ def eval_one_checkpoint(args: argparse.Namespace) -> None:
         "thr_norm_mean_std": float(arr_thr.std()),
         "q_reward_mean_mean": float(arr_q.mean()),
         "q_reward_mean_std": float(arr_q.std()),
+        "wait_reward_mean_mean": float(arr_wait_reward.mean()),
+        "wait_reward_mean_std": float(arr_wait_reward.std()),
         "avg_queue_mean": float(arr_avg_queue.mean()),
         "avg_queue_std": float(arr_avg_queue.std()),
         "worst_queue_mean": float(arr_worst_queue.mean()),
@@ -982,6 +1022,7 @@ def main() -> None:
     ap.add_argument("--queue-ref", type=float, default=1.0)
     ap.add_argument("--w-thr", type=float, default=1.0)
     ap.add_argument("--w-queue", type=float, default=1.0)
+    ap.add_argument("--w-wait", type=float, default=1.0)
     ap.add_argument("--queue-power", type=float, default=1.0)
     ap.add_argument("--reward-clip-lo", type=float, default=-2.0)
     ap.add_argument("--reward-clip-hi", type=float, default=2.0)

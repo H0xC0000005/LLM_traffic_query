@@ -47,6 +47,14 @@ _REWARD_REGISTRY: dict[str, _RewardEntry] = {
     "wait_barrier": _RewardEntry("utility:reward_softmax_wait_barrier_from_encoded_state"),
     "throughput": _RewardEntry("utility:reward_throughput_per_second_on_decision"),
     "throughput_plus_softmax_queue": _RewardEntry("utility:reward_throughput_plus_softmax_queue"),
+    "unbiased_simple_v1": _RewardEntry(
+        "utility:reward_throughput_plus_softmax_queue_plus_softmax_wait_barrier_right_endpoint_v1",
+        init_overrides={
+            "w_throughput": 0.0,
+            "w_queue": 0.0,
+            "w_wait_barrier": 0.0,
+        },
+    ),
     "universal_v2": _RewardEntry(
         "utility:reward_throughput_plus_softmax_queue_deltaq_plus_softmax_wait_barrier_v2",
         init_overrides={
@@ -103,9 +111,7 @@ def resolve_reward(reward_name: str, **bound_kwargs: Any) -> RewardCallable:
     try:
         entry = _REWARD_REGISTRY[reward_name]
     except KeyError as exc:
-        raise ValueError(
-            f"Unknown reward {reward_name!r}. Available: {', '.join(available_reward_names())}"
-        ) from exc
+        raise ValueError(f"Unknown reward {reward_name!r}. Available: {', '.join(available_reward_names())}") from exc
 
     impl = _load_target(entry.target)
     bound_filtered = _filter_kwargs(impl, dict(bound_kwargs))

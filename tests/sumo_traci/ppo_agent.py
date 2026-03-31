@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+import time
 from typing import Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import numpy as np
@@ -423,9 +424,7 @@ class ActorCriticV3(nn.Module):
         hc = self.critic(z)
 
         logits = self.pi(ha)
-        value = self.v(hc).squeeze(
-            -1
-        )  # keep (B,) like V2 :contentReference[oaicite:5]{index=5}
+        value = self.v(hc).squeeze(-1)  # keep (B,) like V2 :contentReference[oaicite:5]{index=5}
         return logits, value
 
 
@@ -450,9 +449,7 @@ class RolloutBuffer:
         self.values: List[float] = []
         self.rewards: List[float] = []
         self.dones: List[bool] = []
-        self.durations_s: List[float] = (
-            []
-        )  # [NEW] elapsed time for each transition (seconds)
+        self.durations_s: List[float] = []  # [NEW] elapsed time for each transition (seconds)
 
         self.returns: Optional[np.ndarray] = None
         self.advs: Optional[np.ndarray] = None
@@ -512,9 +509,7 @@ class RolloutBuffer:
 
             # NEW: time-aware (SMDP) discounting
             dt = self.durations_s[t]
-            gamma_t = float(gamma) ** (
-                float(dt) / float(base_dt_s)
-            )  # [NEW] effective discount for this transition
+            gamma_t = float(gamma) ** (float(dt) / float(base_dt_s))  # [NEW] effective discount for this transition
 
             delta = self.rewards[t] + gamma_t * next_value * mask - self.values[t]
             next_adv = delta + gamma_t * gae_lambda * mask * next_adv
@@ -528,9 +523,7 @@ class RolloutBuffer:
         self.advs = advs
         self.returns = returns
 
-    def minibatches(
-        self, *, batch_size: int, shuffle: bool = True
-    ) -> Iterator[np.ndarray]:
+    def minibatches(self, *, batch_size: int, shuffle: bool = True) -> Iterator[np.ndarray]:
         idx = np.arange(len(self.states))
         if shuffle:
             np.random.shuffle(idx)
@@ -606,6 +599,8 @@ class PPOAgent:
             ],
         )
         self._update_idx: int = 0
+        print(f"PPO agent init: state_dim={self.state_dim}, action_dim={self.action_dim}")
+        time.sleep(3)
         pass
 
     # =======================
@@ -652,11 +647,7 @@ class PPOAgent:
 
         Returns: (action, logp_mu, value)
         """
-        x = (
-            torch.from_numpy(state_vec.astype(np.float32))
-            .unsqueeze(0)
-            .to(self.device_t)
-        )
+        x = torch.from_numpy(state_vec.astype(np.float32)).unsqueeze(0).to(self.device_t)
         logits, value = self.model(x)
 
         # π distribution
@@ -678,11 +669,7 @@ class PPOAgent:
 
     @torch.no_grad()
     def act_greedy(self, state_vec: np.ndarray) -> int:
-        x = (
-            torch.from_numpy(state_vec.astype(np.float32))
-            .unsqueeze(0)
-            .to(self.device_t)
-        )
+        x = torch.from_numpy(state_vec.astype(np.float32)).unsqueeze(0).to(self.device_t)
         logits, _ = self.model(x)
         return int(torch.argmax(logits, dim=1).item())
 
@@ -746,9 +733,7 @@ class PPOAgent:
 
         if alpha > 0.0:
             a_dim = int(self.action_dim)
-            probs_mu = (1.0 - float(alpha)) * probs_pi + float(alpha) * (
-                1.0 / float(a_dim)
-            )
+            probs_mu = (1.0 - float(alpha)) * probs_pi + float(alpha) * (1.0 / float(a_dim))
             sel = probs_mu.gather(1, actions.view(-1, 1)).squeeze(1).clamp_min(1e-12)
             logps_mu = torch.log(sel)
         else:
@@ -757,9 +742,7 @@ class PPOAgent:
         return logps_mu, entropy_pi, values
 
     def update(self, buf: RolloutBuffer) -> Dict[str, float]:
-        assert (
-            buf.returns is not None and buf.advs is not None
-        ), "Call compute_gae() before update()."
+        assert buf.returns is not None and buf.advs is not None, "Call compute_gae() before update()."
 
         states = torch.from_numpy(np.stack(buf.states)).to(self.device_t)
         actions = torch.tensor(buf.actions, dtype=torch.long).to(self.device_t)
@@ -788,9 +771,7 @@ class PPOAgent:
         early_stop = False
 
         for _ in range(int(self.epochs)):
-            for mb_idx in buf.minibatches(
-                batch_size=int(self.minibatch_size), shuffle=True
-            ):
+            for mb_idx in buf.minibatches(batch_size=int(self.minibatch_size), shuffle=True):
                 mb_states = states[mb_idx]
                 mb_actions = actions[mb_idx]
                 mb_old_logps = old_logps[mb_idx]
@@ -800,14 +781,10 @@ class PPOAgent:
 
                 # [NEW] advantage clipping
                 if self.adv_clip is not None:
-                    mb_advs = torch.clamp(
-                        mb_advs, -float(self.adv_clip), float(self.adv_clip)
-                    )
+                    mb_advs = torch.clamp(mb_advs, -float(self.adv_clip), float(self.adv_clip))
 
                 # [NEW] logp under μ, entropy under π
-                logps, entropy, values = self._evaluate(
-                    mb_states, mb_actions, alpha=alpha_cur
-                )
+                logps, entropy, values = self._evaluate(mb_states, mb_actions, alpha=alpha_cur)
 
                 ratio = torch.exp(logps - mb_old_logps)
                 clipped = torch.clamp(ratio, 1.0 - self.clip_eps, 1.0 + self.clip_eps)
@@ -819,9 +796,7 @@ class PPOAgent:
                     vf_clip_frac = torch.tensor(0.0, device=values.device)
                 else:
                     eps_v = float(self.vf_clip_eps)
-                    v_pred_clipped = mb_old_values + torch.clamp(
-                        values - mb_old_values, -eps_v, eps_v
-                    )
+                    v_pred_clipped = mb_old_values + torch.clamp(values - mb_old_values, -eps_v, eps_v)
 
                     v_loss_unclipped = (values - mb_returns).pow(2)
                     v_loss_clipped = (v_pred_clipped - mb_returns).pow(2)
@@ -829,9 +804,7 @@ class PPOAgent:
                     # max matches common PPO implementations (SB3/baselines)
                     v_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
 
-                    vf_clip_frac = (
-                        (torch.abs(values - mb_old_values) > eps_v).float().mean()
-                    )
+                    vf_clip_frac = (torch.abs(values - mb_old_values) > eps_v).float().mean()
                 # ----------------------------------------------------------------
                 ent = entropy.mean()
 
@@ -847,9 +820,7 @@ class PPOAgent:
                     approx_kl = 0.5 * ((logps - mb_old_logps).pow(2)).mean()
 
                     # [NEW] target-KL early stop
-                    if self.target_kl is not None and float(approx_kl.item()) > float(
-                        self.target_kl
-                    ):
+                    if self.target_kl is not None and float(approx_kl.item()) > float(self.target_kl):
                         early_stop = True
 
                     clip_frac = (torch.abs(ratio - 1.0) > self.clip_eps).float().mean()

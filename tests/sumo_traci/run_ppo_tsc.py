@@ -32,9 +32,12 @@ import matplotlib.pyplot as plt
 from ppo_agent import PPOAgent, RolloutBuffer
 from utility import *
 from scene_encoder import (
+    collect_tsc_scene_snapshot,
     encode_tsc_state_vector_bounded_v2,
 )
 from expert_feature_extractor import *
+from reward_registry import available_reward_names, resolve_reward
+from encoder_registry import available_encoder_names, resolve_encoder
 
 """
 constants
@@ -52,8 +55,61 @@ PROBE_ALPHA_SPLINE = 10.0
 PROBE_SPLINE_KNOTS = 6
 
 
+def make_combined_encoder(core_encoder_fn, addon_encoder_fn=None):
+    """
+    Build an encoder that returns:
+      core(scene_stats)                    if addon is None
+      [core(scene_stats), addon(scene_stats)]   otherwise
+
+    Uses namespaced caches:
+      cache["_enc_core"]
+      cache["_enc_addon"]
+    """
+
+    def encoder_fn(
+        tls_id: str,
+        *,
+        scene_stats,
+        cache: dict | None = None,
+        **kwargs,
+    ) -> np.ndarray:
+        if cache is None:
+            cache = {}
+
+        core_cache = cache.setdefault("_enc_core", {})
+        v_core = core_encoder_fn(
+            tls_id=tls_id,
+            scene_stats=scene_stats,
+            cache=core_cache,
+            **kwargs,
+        )
+        v_core = np.asarray(v_core, dtype=np.float32)
+
+        if addon_encoder_fn is None:
+            return v_core
+
+        addon_cache = cache.setdefault("_enc_addon", {})
+        v_add = addon_encoder_fn(
+            tls_id=tls_id,
+            scene_stats=scene_stats,
+            cache=addon_cache,
+            **kwargs,
+        )
+        v_add = np.asarray(v_add, dtype=np.float32)
+
+        return np.concatenate([v_core, v_add], axis=0)
+
+    return encoder_fn
+
+
 # run-specfic encoding function, combining expert features and original scene encoder
-def encode_tsc_state_vector_combined(tls_id: str, *, cache: Optional[dict] = None, **kwargs) -> np.ndarray:
+def encode_tsc_state_vector_combined(
+    tls_id: str,
+    *,
+    cache: Optional[dict] = None,
+    scene_stats=None,
+    **kwargs,
+) -> np.ndarray:
     """
     Returns concatenated features:
       [ encode_tsc_state_vector_bounded(...) , tsc_isolated_intersection_feature_vector(...) ]
@@ -64,11 +120,13 @@ def encode_tsc_state_vector_combined(tls_id: str, *, cache: Optional[dict] = Non
     """
     if cache is None:
         cache = {}
+    if scene_stats is None:
+        raise ValueError("scene_stats is required for combined encoder to support baseline feature extractor")
 
     core_cache = cache.setdefault("_enc_core", {})
     sem_cache = cache.setdefault("_enc_sem", {})
 
-    v_core = encode_tsc_state_vector_bounded_v2(tls_id, cache=core_cache, **kwargs)
+    v_core = encode_tsc_state_vector_bounded_v2(tls_id, cache=core_cache, scene_stats=scene_stats, **kwargs)
     v_sem = tsc_isolated_intersection_feature_vector(tls_id, cache=sem_cache)
     # v_sem = tsc_isolated_intersection_feature_vector(tls_id)
     sem_cache["_last_v_sem"] = v_sem  # <-- key line
@@ -79,6 +137,40 @@ def encode_tsc_state_vector_combined(tls_id: str, *, cache: Optional[dict] = Non
             np.asarray(v_sem, dtype=np.float32),
         ],
         axis=0,
+    )
+
+
+def _compute_transition_reward(
+    reward_fn,
+    *,
+    tls_id: str,
+    sim_time: float,
+    scene_stats,
+    cache: dict,
+    gamma_dt: float = 1.0,
+    init_only: bool = False,
+    **runtime_overrides,
+) -> float:
+    """Centralized training-time reward invocation.
+
+    The resolved reward callable already has experiment-level configuration bound at
+    startup. This wrapper only supplies per-transition runtime inputs and keeps the
+    training loop independent from reward-specific function names or argument lists.
+
+    `init_only=True` is used for the cache-warmup path before the first controlled
+    transition. Rewards that need cache priming can implement it through resolver-side
+    init overrides; other rewards simply return 0.0 in init mode.
+    """
+    return float(
+        reward_fn(
+            tls_id=tls_id,
+            sim_time=sim_time,
+            scene_stats=scene_stats,
+            cache=cache,
+            gamma_dt=gamma_dt,
+            init_only=init_only,
+            **runtime_overrides,
+        )
     )
 
 
@@ -652,6 +744,9 @@ def run_ppo_tsc(
     traffic_scale_std: float,
     tb_logdir: str,
     save_dir: str,
+    reward_name: str,
+    core_encoder_name: str = "bounded_v2",
+    addon_encoder_name: str = "none",
     # reward params (reuse your existing utility functions)
     throughput_ref_veh_per_s: float,
     queue_ref_veh: float,
@@ -701,14 +796,32 @@ def run_ppo_tsc(
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    if use_expert_features:
-        encoder_fn = encode_tsc_state_vector_combined
-        print("[run_ppo_tsc] Using combined encoder with expert features.")
-        time.sleep(3)  # allow user to see the print
-    else:
-        encoder_fn = encode_tsc_state_vector_bounded_v2
-        print("[run_ppo_tsc] Using core scenario encoder only.")
-        time.sleep(3)  # allow user to see the print
+    core_encoder_fn = resolve_encoder(
+        core_encoder_name,
+        min_major_green_s=action_hold_s,
+    )
+
+    addon_encoder_fn = None
+    if str(addon_encoder_name).lower() not in {"", " ", "none", "null"}:
+        addon_encoder_fn = resolve_encoder(
+            addon_encoder_name,
+            min_major_green_s=action_hold_s,
+        )
+    # if use_expert_features:
+    #     # encoder_fn = encode_tsc_state_vector_combined
+    #     encoder_fn = make_combined_encoder(core_encoder_fn)
+    #     print(f"[run_ppo_tsc] Using encoder='{encoder_name}' + expert features.")
+    #     time.sleep(3)  # allow user to see the print
+    # else:
+    #     encoder_fn = encode_tsc_state_vector_bounded_v2
+    #     print(f"[run_ppo_tsc] Using encoder='{encoder_name}' only.")
+    #     time.sleep(3)  # allow user to see the print
+    encoder_fn = make_combined_encoder(
+        core_encoder_fn=core_encoder_fn,
+        addon_encoder_fn=addon_encoder_fn,
+    )
+    print(f"[run_ppo_tsc] encoder core='{core_encoder_name}', " f"addon='{addon_encoder_name}'")
+    time.sleep(4)
     expert_stats: dict[RunningFeatureStats] = {}  # tls_id -> RunningFeatureStats
     expert_names = {}  # tls_id -> list[str] (optional)
 
@@ -719,6 +832,28 @@ def run_ppo_tsc(
 
     run_name = f"sumo_ppo_seed{seed}_{(log_tag + '_' if log_tag else '')}{int(time.time())}"
     writer = SummaryWriter(log_dir=os.path.join(tb_logdir, run_name))
+
+    reward_fn = resolve_reward(
+        reward_name,
+        throughput_ref_veh_per_s=throughput_ref_veh_per_s,
+        queue_ref_veh=queue_ref_veh,
+        wait_ref_s=wait_ref_s,
+        wait_barrier_start_s=wait_barrier_start_s,
+        w_throughput=w_throughput,
+        w_queue=w_queue,
+        w_delta_queue=w_delta_queue,
+        w_wait_barrier=w_wait,
+        w_queue_zone=w_queue_zone,
+        w_starve_potential=w_starve_potential,
+        softmax_wait_beta=softmax_wait_beta,
+        softmax_queue_beta=softmax_queue_beta,
+        queue_power=queue_power,
+        starve_softmax_beta=starve_softmax_beta,
+        starve_power=starve_power,
+        top2_w1=top2_w1,
+        top2_w2=top2_w2,
+        min_major_green_s=action_hold_s,
+    )
 
     agents: Dict[str, PPOAgent] = {}
     buffers: Dict[str, RolloutBuffer] = {}
@@ -767,10 +902,19 @@ def run_ppo_tsc(
                 if tls_id not in kl_early_stop_cum:
                     kl_early_stop_cum[tls_id] = 0
                 if tls_id not in agents:
-                    s0 = encoder_fn(
+                    scene_stats0 = collect_tsc_scene_snapshot(
                         tls_id,
+                        cache=encoder_cache[tls_id],
                         moving_speed_threshold=0.1,
                         stopped_speed_threshold=0.1,
+                    )
+
+                    s0 = encoder_fn(
+                        tls_id,
+                        scene_stats=scene_stats0,
+                        moving_speed_threshold=0.1,
+                        stopped_speed_threshold=0.1,
+                        wait_ref_s=wait_ref_s,
                         cache=encoder_cache[tls_id],
                     ).astype(np.float32)
                     state_dim = int(s0.shape[0])
@@ -890,62 +1034,39 @@ def run_ppo_tsc(
                             ):
                                 continue
 
+                            terminal_scene_stats = collect_tsc_scene_snapshot(
+                                tls_id,
+                                moving_speed_threshold=0.1,
+                                stopped_speed_threshold=0.1,
+                                cache=(
+                                    encoder_cache[tls_id].setdefault("_enc_core", {})
+                                    if use_expert_features
+                                    else encoder_cache[tls_id]
+                                ),
+                                wait_ref_s=wait_ref_s,
+                            )
+
                             terminal_state = encoder_fn(
                                 tls_id,
                                 moving_speed_threshold=0.1,
                                 stopped_speed_threshold=0.1,
                                 cache=encoder_cache[tls_id],
+                                scene_stats=terminal_scene_stats,
                                 wait_ref_s=wait_ref_s,
                             ).astype(np.float32)
 
-                            # OLD: only work with single scenario encoder
-                            # num_lanes = max(
-                            #     1, len(encoder_cache[tls_id].get("lane_ids", []))
-                            # )
-                            # NEW: combined encoder uses namespaced cache
-                            # num_lanes = max(
-                            #     1,
-                            #     len(
-                            #         encoder_cache[tls_id]
-                            #         .get("_enc_core", {})
-                            #         .get("lane_ids", [])
-                            #     ),
-                            # )
-                            lane_ids = (
-                                encoder_cache[tls_id].get("_enc_core", {}).get("lane_ids", [])
-                                if use_expert_features
-                                else encoder_cache[tls_id].get("lane_ids", [])
-                            )
-                            num_lanes = max(1, len(lane_ids))
+                            lane_ids = list(terminal_scene_stats.lane_ids)
+                            num_lanes = max(1, terminal_scene_stats.num_lanes)
 
                             dt_interval = sim_t - float(st.action_start_time)
                             gamma_dt = float(gamma) ** (dt_interval / max(1e-6, float(action_hold_s)))
-                            r = reward_throughput_plus_softmax_queue_deltaq_plus_softmax_wait_barrier_v2(
+                            r = _compute_transition_reward(
+                                reward_fn,
                                 tls_id=tls_id,
                                 sim_time=sim_t,
-                                state_vec=terminal_state,
+                                scene_stats=terminal_scene_stats,
                                 cache=encoder_cache[tls_id],
-                                num_lanes=num_lanes,
-                                throughput_ref_veh_per_s=throughput_ref_veh_per_s,
-                                queue_ref_veh=queue_ref_veh,
-                                # [NEW] wait barrier params
-                                wait_ref_s=wait_ref_s,
-                                wait_barrier_start_s=wait_barrier_start_s,
-                                softmax_wait_beta=softmax_wait_beta,
-                                # [NEW] weights for new reward terms
-                                w_throughput=w_throughput,
-                                w_queue=w_queue,
-                                w_delta_queue=w_delta_queue,
-                                w_wait_barrier=w_wait,
-                                w_queue_zone=w_queue_zone,
-                                # [NEW] starvation shaping
-                                w_starve_potential=w_starve_potential,
-                                starve_softmax_beta=starve_softmax_beta,
-                                starve_power=starve_power,
                                 gamma_dt=gamma_dt,
-                                # unchanged queue config
-                                queue_power=queue_power,
-                                softmax_queue_beta=softmax_queue_beta,
                             )
 
                             if ENABLE_PROBES:
@@ -1072,11 +1193,24 @@ def run_ppo_tsc(
                         if sim_t < st.next_decision_time:
                             continue
 
+                        scene_stats = collect_tsc_scene_snapshot(
+                            tls_id,
+                            moving_speed_threshold=0.1,
+                            stopped_speed_threshold=0.1,
+                            cache=(
+                                encoder_cache[tls_id].setdefault("_enc_core", {})
+                                if use_expert_features
+                                else encoder_cache[tls_id]
+                            ),
+                            wait_ref_s=wait_ref_s,
+                        )
+
                         cur_state = encoder_fn(
                             tls_id,
                             moving_speed_threshold=0.1,
                             stopped_speed_threshold=0.1,
                             cache=encoder_cache[tls_id],
+                            scene_stats=scene_stats,
                             wait_ref_s=wait_ref_s,
                         ).astype(np.float32)
 
@@ -1085,12 +1219,8 @@ def run_ppo_tsc(
                             if v_sem is not None:
                                 expert_stats[tls_id].update(v_sem)
 
-                        lane_ids = (
-                            encoder_cache[tls_id].get("_enc_core", {}).get("lane_ids", [])
-                            if use_expert_features
-                            else encoder_cache[tls_id].get("lane_ids", [])
-                        )
-                        num_lanes = max(1, len(lane_ids))
+                        lane_ids = list(scene_stats.lane_ids)
+                        num_lanes = max(1, scene_stats.num_lanes)
 
                         # [NEW BLOCK] close previous interval and push to PPO rollout buffer
                         if (
@@ -1102,32 +1232,13 @@ def run_ppo_tsc(
                         ):
                             dt_interval = sim_t - float(st.action_start_time)
                             gamma_dt = float(gamma) ** (dt_interval / max(1e-6, float(action_hold_s)))
-                            r = reward_throughput_plus_softmax_queue_deltaq_plus_softmax_wait_barrier_v2(
+                            r = _compute_transition_reward(
+                                reward_fn,
                                 tls_id=tls_id,
                                 sim_time=sim_t,
-                                state_vec=cur_state,
+                                scene_stats=scene_stats,
                                 cache=encoder_cache[tls_id],
-                                num_lanes=num_lanes,
-                                throughput_ref_veh_per_s=throughput_ref_veh_per_s,
-                                queue_ref_veh=queue_ref_veh,
-                                # [NEW] wait barrier params
-                                wait_ref_s=wait_ref_s,
-                                wait_barrier_start_s=wait_barrier_start_s,
-                                softmax_wait_beta=softmax_wait_beta,
-                                # [NEW] weights for new reward terms
-                                w_throughput=w_throughput,
-                                w_queue=w_queue,
-                                w_delta_queue=w_delta_queue,
-                                w_wait_barrier=w_wait,
-                                w_queue_zone=w_queue_zone,
-                                # [NEW] starvation shaping
-                                w_starve_potential=w_starve_potential,
-                                starve_softmax_beta=starve_softmax_beta,
-                                starve_power=starve_power,
                                 gamma_dt=gamma_dt,
-                                # unchanged queue config
-                                queue_power=queue_power,
-                                softmax_queue_beta=softmax_queue_beta,  # keep default, or expose as arg if you want
                             )
                             if ENABLE_PROBES:
                                 probe_recorders[tls_id].record_step(cur_state, r)
@@ -1148,8 +1259,7 @@ def run_ppo_tsc(
                             writer.add_scalar(f"{tls_id}/train/reward", float(r), step)
                             # --- wait barrier term (raw <= 0) ---
                             waitbar_raw = reward_softmax_wait_barrier_from_encoded_state(
-                                cur_state,  # IMPORTANT: use the same state_vec you used for reward
-                                num_lanes=num_lanes,
+                                scene_stats=scene_stats,
                                 wait_ref_s=wait_ref_s,
                                 softmax_beta=softmax_wait_beta,
                                 barrier_start_s=wait_barrier_start_s,
@@ -1168,32 +1278,14 @@ def run_ppo_tsc(
                             # per-decision scalars (optional but useful)
                             writer.add_scalar(f"{tls_id}/train/waitbar_raw", wb, step)
                         else:
-                            _ = reward_throughput_plus_softmax_queue_deltaq_plus_softmax_wait_barrier_v2(
+                            _ = _compute_transition_reward(
+                                reward_fn,
                                 tls_id=tls_id,
                                 sim_time=sim_t,
-                                state_vec=cur_state,
+                                scene_stats=scene_stats,
                                 cache=encoder_cache[tls_id],
-                                num_lanes=num_lanes,
-                                throughput_ref_veh_per_s=throughput_ref_veh_per_s,
-                                queue_ref_veh=queue_ref_veh,
-                                # [NEW] wait barrier params (still update caches)
-                                wait_ref_s=wait_ref_s,
-                                wait_barrier_start_s=wait_barrier_start_s,
-                                softmax_wait_beta=softmax_wait_beta,
-                                # [NEW] all weights zero => no-op reward but caches get initialized
-                                w_throughput=0.0,
-                                w_queue=0.0,
-                                w_delta_queue=0.0,
-                                w_wait_barrier=0.0,
-                                w_queue_zone=0.0,
-                                # [NEW] init starvation cache too (still no-op because weights are 0)
-                                w_starve_potential=w_starve_potential,
-                                starve_softmax_beta=starve_softmax_beta,
-                                starve_power=starve_power,
                                 gamma_dt=1.0,
-                                # unchanged queue config
-                                queue_power=queue_power,
-                                softmax_queue_beta=softmax_queue_beta,
+                                init_only=True,
                             )
 
                         # NEW
@@ -1549,7 +1641,10 @@ def run_ppo_tsc(
             "ppo_epochs": int(ppo_epochs),
             "minibatch_size": int(minibatch_size),
             "rollout_steps": int(rollout_steps),
-            "encoder": getattr(encoder_fn, "__name__", "<unknown>"),
+            "core_encoder_name": str(core_encoder_name),
+            "addon_encoder_name": str(addon_encoder_name),
+            "use_expert_features": bool(use_expert_features),
+            "reward_name": str(reward_name),
             "traffic_scale_mean": float(traffic_scale_mean),
             "traffic_scale_std": float(traffic_scale_std),
             "saved_unix_time": float(time.time()),
@@ -1601,9 +1696,6 @@ def main() -> None:
     ap.add_argument("--vf-clip-eps", type=float, default=None)
     ap.add_argument("--gae-lambda", type=float, default=0.95)
     ap.add_argument("--ent-coef", type=float, default=0.01)
-    # -------------------------------
-    # [NEW] Training-scheme stabilizers
-    # -------------------------------
     ap.add_argument("--ent-coef-end", type=float, default=None)
     ap.add_argument("--ent-coef-decay-updates", type=int, default=0)
 
@@ -1618,7 +1710,23 @@ def main() -> None:
     # -------------------------------
     ap.add_argument("--vf-coef", type=float, default=0.5)
 
+    # encoder
+    ap.add_argument(
+        "--core-encoder-name",
+        type=str,
+        default="bounded_v2",
+        choices=available_encoder_names(),
+        help="Core encoder name.",
+    )
+    ap.add_argument(
+        "--addon-encoder-name",
+        type=str,
+        default="none",
+        help="Optional addon encoder name. Use 'none' for core-only.",
+    )
+
     # Reward (defaults)
+    ap.add_argument("--reward-name", type=str, default="universal_v2", choices=available_reward_names())
     ap.add_argument("--thr-ref", type=float, default=0.30)
     ap.add_argument("--queue-ref", type=float, default=15.0)
     ap.add_argument("--w-thr", type=float, default=1.0)
@@ -1677,6 +1785,9 @@ def main() -> None:
         traffic_scale_std=float(args.traffic_scale_std),
         tb_logdir=args.tb_logdir,
         save_dir=args.save_dir,
+        reward_name=str(args.reward_name),
+        core_encoder_name=str(args.core_encoder_name),
+        addon_encoder_name=str(args.addon_encoder_name),
         throughput_ref_veh_per_s=float(args.thr_ref),
         queue_ref_veh=float(args.queue_ref),
         w_throughput=float(args.w_thr),

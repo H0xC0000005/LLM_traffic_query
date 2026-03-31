@@ -10,7 +10,7 @@ Set-Location $WorkDir
 # --------------------------------------------------
 # Select what to run
 # --------------------------------------------------
-$ControllerName = "ppo"            # "ppo" | "fully_actuated" | "max_pressure"
+$ControllerName = "ppo"            # "ppo" | "fully_actuated" | "max_pressure" | "webster" | "fixed_time"
 $ModelKey       = "base1"           # only used when ControllerName = "ppo"
 
 # --------------------------------------------------
@@ -19,11 +19,12 @@ $ModelKey       = "base1"           # only used when ControllerName = "ppo"
 # --------------------------------------------------
 $ModelTable = @{
     "base1" = @{
-        Checkpoint = "E:\repos\LLM_traffic_query\tests\sumo_traci\models_all\models_3LR23LR2\1\sumo_ppo_seed172_base1_600ep_2048roll_5step_1771590042__J1.pt"
-        LogTag     = "base1_comparison"
+        # E:\repos\LLM_traffic_query\tests\sumo_traci\models_all\models_22+22+_2\sumo_ppo_seed172_exp1_600ep_1_1771926979__J1.pt
+        Checkpoint = "E:\repos\LLM_traffic_query\tests\sumo_traci\models_all\models_3232skewed_1\sumo_ppo_seed172_base_r_p_enc_bounded_v2_reward_pressure_1774406863__J0.pt"
+        LogTag     = "b"
     }
     "exp1" = @{
-        Checkpoint = "E:\repos\LLM_traffic_query\tests\sumo_traci\models_all\models_22+22+_2\sumo_ppo_seed172_exp1_600ep_1_1771926979__J1.pt"
+        Checkpoint = "E:\repos\LLM_traffic_query\tests\sumo_traci\models_all\models_22+22+_2\sumo_ppo_seed172_exp1_600ep_1_1771926979__J1"
         LogTag     = "zeroblk_1_4"
     }
 }
@@ -33,8 +34,11 @@ $ModelTable = @{
 # It may also override PPO meta if you want
 # --------------------------------------------------
 $Scenario = @{
-    Sumocfg = "E:\Sumo\sumo_maps\4leg_3LR23LR2\4leg_3LR23LR2.sumocfg"
-    TlsId   = "J1"
+    # Sumocfg = "E:\Sumo\sumo_maps\4leg_3LR23LR2\4leg_3LR23LR2.sumocfg" "E:\Sumo\sumo_maps\4leg_22+22+\4leg_22+22+.sumocfg"
+    # "E:\Sumo\sumo_maps\4leg_3232skewed\4leg_3232skewed.sumocfg"
+    Sumocfg = "E:\Sumo\sumo_maps\4leg_3232skewed\4leg_3232skewed.sumocfg"
+    # J0: 3232 skewed; J1: 3LR23LR2
+    TlsId   = "J0"
 }
 
 # --------------------------------------------------
@@ -42,11 +46,16 @@ $Scenario = @{
 # --------------------------------------------------
 $EvalArgs = @(
     "--controller-name", $ControllerName,
-    "--log-dir", ".\tests\sumo_traci\eval_results\3LR23LR2\rule_based",
+    # "E:\repos\LLM_traffic_query\tests\sumo_traci\eval_results\3LR23LR2\ub", 
+    # "E:\repos\LLM_traffic_query\tests\sumo_traci\eval_results\3232skewed\ub",
+    "--log-dir", "E:\repos\LLM_traffic_query\tests\sumo_traci\eval_results\3232skewed\ub",
     "--episodes", "200",
     "--episode-len", "3600",
     "--sumo-seed", "10086",
-    "--deterministic"
+    "--deterministic",
+    "--w-thr", "0.9",
+    "--w-queue", "0.7",
+    "--w-wait", "1.3"
 )
 
 # Optional PPO-only ablation knobs
@@ -100,6 +109,28 @@ switch ($ControllerName) {
             "--sumocfg", $Scenario.Sumocfg,
             "--tls-id",  $Scenario.TlsId,
             "--log-tag", "max_pressure"
+        )
+    }
+
+    "webster" {
+        if (-not $Scenario.Sumocfg) { throw "Scenario.Sumocfg is required for webster" }
+        if (-not $Scenario.TlsId)   { throw "Scenario.TlsId is required for webster" }
+
+        $EvalArgs += @(
+            "--sumocfg", $Scenario.Sumocfg,
+            "--tls-id",  $Scenario.TlsId,
+            "--log-tag", "webster"
+        )
+    }
+
+    "fixed_time" {
+        if (-not $Scenario.Sumocfg) { throw "Scenario.Sumocfg is required for fixed_time" }
+        if (-not $Scenario.TlsId)   { throw "Scenario.TlsId is required for fixed_time" }
+
+        $EvalArgs += @(
+            "--sumocfg", $Scenario.Sumocfg,
+            "--tls-id",  $Scenario.TlsId,
+            "--log-tag", "fixed_time"
         )
     }
 

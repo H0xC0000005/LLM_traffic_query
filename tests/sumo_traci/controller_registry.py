@@ -7,8 +7,9 @@ from typing import Any, Callable
 CONTROLLER_REGISTRY: dict[str, str] = {
     "fully_actuated": "controllers.fully_actuated:FullyActuatedController",
     "max_pressure": "controllers.max_pressure:MaxPressureController",
+    "fixed_time": "controllers.fixed_time:WebsterController",
+    "webster": "controllers.fixed_time:WebsterController",
 }
-
 
 
 def _resolve_symbol(target: str) -> Any:
@@ -17,10 +18,8 @@ def _resolve_symbol(target: str) -> Any:
     return getattr(module, symbol_name)
 
 
-
 def list_controllers() -> list[str]:
     return sorted(CONTROLLER_REGISTRY.keys())
-
 
 
 def make_controller(name: str, /, **kwargs: Any):
