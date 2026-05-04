@@ -4,7 +4,7 @@ import argparse
 import pickle
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 from datetime import datetime
 import re
 import numpy as np
@@ -12,7 +12,11 @@ import pandas as pd
 import lightgbm as lgb
 
 import utility
-from expert_feature_extractor import extract_expert_features
+from supplementary_feature_registry import (
+    get_supplementary_extractor,
+    list_supplementary_extractors,
+    normalize_supplementary_encoder_name,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -34,23 +38,35 @@ def parse_args() -> argparse.Namespace:
         help="Train on log1p(y); RMSE on log1p equals RMSLE on original scale",
     )
 
-    # Feature selection / identity removal    # Optional identity features (off by default)
+    # Feature selection / identity removal
     p.add_argument(
         "--keep_site_id", action="store_true", default=False, help="Include site_id as a categorical feature"
     )
     p.add_argument(
         "--keep_building_id", action="store_true", default=False, help="Include building_id as a categorical feature"
     )
-    # Backward-compatible drop flags (suppressed from help). If passed, they override keep_*.
     p.add_argument("--drop_site_id", action="store_true", default=False, help=argparse.SUPPRESS)
     p.add_argument("--drop_building_id", action="store_true", default=False, help=argparse.SUPPRESS)
 
-    # Expert features
+    # Supplementary feature encoders
+    p.add_argument(
+        "--supplementary_encoder",
+        type=str,
+        default="none",
+        choices=list_supplementary_extractors(include_none=True),
+        help="Optional supplementary feature encoder block",
+    )
+    p.add_argument(
+        "--supplementary_exclude_building_id",
+        action="store_true",
+        default=False,
+        help="Prevent supplementary encoders from using building_id directly or via building-keyed derived features.",
+    )
     p.add_argument(
         "--use_expert_features",
         action="store_true",
         default=False,
-        help="If set, calls expert_features.extract_expert_features(df) and concatenates",
+        help=argparse.SUPPRESS,
     )
 
     # LightGBM knobs (configurable)
@@ -94,15 +110,18 @@ def parse_args() -> argparse.Namespace:
         "--log_tag", type=str, default="lgbm_run", help="TensorBoard run subdir name (used under out_dir/tb_lgbm/)"
     )
 
-    return p.parse_args()
+    args = p.parse_args()
+    if args.use_expert_features and args.supplementary_encoder == "none":
+        args.supplementary_encoder = "expert"
+    args.supplementary_encoder = normalize_supplementary_encoder_name(args.supplementary_encoder)
+    return args
 
 
 def _sanitize_run_name(s: str) -> str:
-    # Keep it filesystem + TB friendly
     s = s.strip()
     s = re.sub(r"\s+", "_", s)
     s = re.sub(r"[^A-Za-z0-9._-]+", "_", s)
-    return s[:180]  # avoid ridiculously long paths
+    return s[:180]
 
 
 def build_default_run_name(args: argparse.Namespace) -> str:
@@ -113,13 +132,14 @@ def build_default_run_name(args: argparse.Namespace) -> str:
         f"lr{args.learning_rate:g}",
         f"L{args.num_leaves}",
         f"minleaf{args.min_data_in_leaf}",
-        "exp" if args.use_expert_features else "base",
+        args.supplementary_encoder,
     ]
-    # Optional identity features
     if getattr(args, "keep_site_id", False):
         parts.append("sid")
     if getattr(args, "keep_building_id", False):
         parts.append("bid")
+    if getattr(args, "supplementary_exclude_building_id", False):
+        parts.append("supNoBid")
 
     base = "_".join(parts)
     if args.log_tag:
@@ -128,13 +148,6 @@ def build_default_run_name(args: argparse.Namespace) -> str:
 
 
 def choose_feature_columns(all_cols: List[str]) -> List[str]:
-    """
-    Minimal, explainable baseline: use raw weather/building meta + your engineered features.
-    Exclude label, identifiers, and timestamps later via drop_cols.
-
-    Adjust here if you want stricter control; this keeps it simple.
-    """
-    # Preferred baseline engineered feature set (from your approved list)
     engineered = [
         "hour_sin",
         "hour_cos",
@@ -154,8 +167,6 @@ def choose_feature_columns(all_cols: List[str]) -> List[str]:
         "log_sqft",
         "year_built_clipped",
     ]
-
-    # Raw columns to include (not “engineered”; just the measured/context fields)
     raw = [
         "meter",
         "primary_use",
@@ -169,70 +180,49 @@ def choose_feature_columns(all_cols: List[str]) -> List[str]:
         "wind_direction",
         "wind_speed",
     ]
-
-    keep = [c for c in (raw + engineered) if c in all_cols]
-    return keep
+    return [c for c in (raw + engineered) if c in all_cols]
 
 
-def _coerce_expert_df(
-    expert_df: pd.DataFrame | np.ndarray,
+def _coerce_supplementary_df(
+    feature_df,
     *,
     expected_rows: int,
     label_col: str,
 ) -> pd.DataFrame:
-    if expert_df is None:
-        raise ValueError("Expert feature extractor returned None; expected a DataFrame with expert features.")
-    if not isinstance(expert_df, pd.DataFrame):
-        expert_df = pd.DataFrame(expert_df)
-    if len(expert_df) != expected_rows:
-        raise ValueError(f"Expert feature rows mismatch: {len(expert_df)} vs {expected_rows}")
+    if feature_df is None:
+        raise ValueError("Supplementary feature extractor returned None; expected a DataFrame.")
+    if not isinstance(feature_df, pd.DataFrame):
+        feature_df = pd.DataFrame(feature_df)
+    if len(feature_df) != expected_rows:
+        raise ValueError(f"Supplementary feature rows mismatch: {len(feature_df)} vs {expected_rows}")
 
     forbidden = {label_col, "timestamp", "building_id", "site_id"}
-    cols_to_drop = [c for c in expert_df.columns if c in forbidden]
+    cols_to_drop = [c for c in feature_df.columns if c in forbidden]
     if cols_to_drop:
-        expert_df = expert_df.drop(columns=cols_to_drop)
+        feature_df = feature_df.drop(columns=cols_to_drop)
 
-    return expert_df.reset_index(drop=True)
+    return feature_df.reset_index(drop=True)
 
 
 def main() -> None:
     args = parse_args()
     utility.common_set_seed(args.seed)
 
-    run_name = build_default_run_name(args)
     out_dir = Path(args.out_dir)
     data_path = Path(args.data_parquet)
-    # model_out_dir = Path(args.out_dir + f"/models/{build_default_run_name(args)}")
+    run_name = build_default_run_name(args)
     model_out_dir = out_dir / "models" / run_name
     utility.common_ensure_dir(model_out_dir)
 
-    run_name = build_default_run_name(args)
     tb_root = out_dir / "tb_lgbm"
     tb_dir = tb_root / run_name
     utility.common_ensure_dir(tb_dir)
 
-    # Columns needed for training + split + categoricals + label
-    # (Load only what you need to reduce RAM)
-    base_needed = [
-        args.label_col,
-        "timestamp",
-        "building_id",
-        "site_id",
-    ]
-    # We will add chosen features after loading schema once (cheap approach: load only columns list)
-    # Pandas doesn't expose schema without reading; we read minimal columns first, then re-read.
+    base_needed = [args.label_col, "timestamp", "building_id", "site_id"]
     df_min = utility.common_load_parquet_dataset(data_path, columns=base_needed, engine="pyarrow")
-    all_cols = list(df_min.columns)
 
-    # Now decide feature columns based on full dataset columns by doing a lightweight schema read:
-    # Easiest approach: read metadata by reading a small set of columns already; but we need full col list.
-    # If your parquet preserves full columns, do a full read of column names by reading row group metadata is harder.
-    # Practical approach: just re-read without columns but without materializing? Not available in pandas.
-    # So we will assume your parquet includes expected columns and directly list them.
-    # Instead, load again with the full set we plan to use.
     keep_cols = choose_feature_columns(
         all_cols=(
-            # Since df_min doesn't include the others, just provide a superset typical for this dataset
             base_needed
             + [
                 "meter",
@@ -266,8 +256,7 @@ def main() -> None:
             ]
         )
     )
-    # Identity feature switches: by default these are excluded (dropped) unless explicitly kept.
-    # drop_* (hidden flags) override keep_* for backwards compatibility.
+
     use_site_id = bool(getattr(args, "keep_site_id", False)) and not bool(getattr(args, "drop_site_id", False))
     use_building_id = bool(getattr(args, "keep_building_id", False)) and not bool(
         getattr(args, "drop_building_id", False)
@@ -278,26 +267,20 @@ def main() -> None:
     if use_building_id and "building_id" in df_min.columns and "building_id" not in keep_cols:
         keep_cols.append("building_id")
 
-    # If expert features are enabled, load the FULL dataset so the extractor can see everything.
     load_cols = sorted(set(base_needed + ["timestamp"] + keep_cols))
-    if args.use_expert_features:
+    if args.supplementary_encoder != "none":
         df = utility.common_load_parquet_dataset(data_path, engine="pyarrow")
     else:
         df = utility.common_load_parquet_dataset(data_path, columns=load_cols, engine="pyarrow")
 
-    # Keep only baseline feature cols that actually exist in df.
     keep_cols = [c for c in keep_cols if c in df.columns]
 
-    # Identity columns:
-    # - timestamp is used only for the time split; never a model feature
-    # - building_id / site_id are dropped by default unless explicitly kept via --keep_*.
     drop_cols = ["timestamp"]
     if (not use_building_id) and "building_id" in df.columns:
         drop_cols.append("building_id")
     if (not use_site_id) and "site_id" in df.columns:
         drop_cols.append("site_id")
 
-    # Native categorical handling: keep as pandas category dtype and pass to LightGBM
     categorical_cols = ["primary_use", "meter", "dayofweek"]
     if use_site_id and "site_id" in df.columns:
         categorical_cols.append("site_id")
@@ -305,55 +288,71 @@ def main() -> None:
         categorical_cols.append("building_id")
     categorical_cols = [c for c in categorical_cols if c in df.columns]
 
-    # Time split BEFORE any target-derived expert feature fitting.
     train_mask, val_mask, cutoff = utility.common_time_split(df, "timestamp", args.val_days)
     print(f"[Split] cutoff={cutoff}  train_rows={train_mask.sum()}  val_rows={val_mask.sum()}")
 
-    # -------------------------------------------------------------------------
-    # Expert feature extraction:
-    #   fit cache on train split only, then transform val split with frozen cache.
-    # -------------------------------------------------------------------------
-    expert_cols: List[str] = []
-    if args.use_expert_features:
-        print("[Expert] fitting on train split only, then transforming val split...")
-        expert_cache: dict = {}
+    supplementary_cols: List[str] = []
+    if args.supplementary_encoder != "none":
+        print(f"[Supplementary] encoder={args.supplementary_encoder} (fit on train, transform on val)...")
+        extractor = get_supplementary_extractor(args.supplementary_encoder)
+        encoder_cache: dict = {
+            "encoder_name": args.supplementary_encoder,
+            "label_col": args.label_col,
+            "exclude_building_id": bool(args.supplementary_exclude_building_id),
+        }
 
         train_index = df.index[train_mask]
         val_index = df.index[val_mask]
-        df_train_exp = df.loc[train_index].copy()
-        df_val_exp = df.loc[val_index].copy()
-        # Validation must be transform-only for any target-derived expert block.
-        if args.label_col in df_val_exp.columns:
-            df_val_exp = df_val_exp.drop(columns=[args.label_col])
 
-        expert_train_df = _coerce_expert_df(
-            extract_expert_features(df_train_exp, cache=expert_cache),
+        sup_train_input = df.loc[train_index].copy()
+        if args.supplementary_exclude_building_id and "building_id" in sup_train_input.columns:
+            sup_train_input = sup_train_input.drop(columns=["building_id"])
+
+        sup_val_input = df.loc[val_index].copy()
+        if args.label_col in sup_val_input.columns:
+            sup_val_input = sup_val_input.drop(columns=[args.label_col])
+        if args.supplementary_exclude_building_id and "building_id" in sup_val_input.columns:
+            sup_val_input = sup_val_input.drop(columns=["building_id"])
+
+        sup_train_df = _coerce_supplementary_df(
+            extractor(
+                sup_train_input,
+                cache=encoder_cache,
+                mode="fit_transform",
+                label_col=args.label_col,
+                exclude_building_id=args.supplementary_exclude_building_id,
+            ),
             expected_rows=len(train_index),
             label_col=args.label_col,
         )
-        expert_val_df = _coerce_expert_df(
-            extract_expert_features(df_val_exp, cache=expert_cache),
+        sup_val_df = _coerce_supplementary_df(
+            extractor(
+                sup_val_input,
+                cache=encoder_cache,
+                mode="transform",
+                label_col=args.label_col,
+                exclude_building_id=args.supplementary_exclude_building_id,
+            ),
             expected_rows=len(val_index),
             label_col=args.label_col,
         )
 
-        if list(expert_train_df.columns) != list(expert_val_df.columns):
-            missing_in_val = sorted(set(expert_train_df.columns) - set(expert_val_df.columns))
-            missing_in_train = sorted(set(expert_val_df.columns) - set(expert_train_df.columns))
+        if list(sup_train_df.columns) != list(sup_val_df.columns):
+            missing_in_val = sorted(set(sup_train_df.columns) - set(sup_val_df.columns))
+            missing_in_train = sorted(set(sup_val_df.columns) - set(sup_train_df.columns))
             raise ValueError(
-                "Expert feature columns differ between train-fit and val-transform. "
+                "Supplementary feature columns differ between train-fit and val-transform. "
                 f"missing_in_val={missing_in_val[:20]} "
                 f"missing_in_train={missing_in_train[:20]}"
             )
 
-        # Avoid name collisions once, then apply the same renaming to both splits.
         existing_cols = set(df.columns)
         rename_map = {}
         used_new = set()
-        for c in expert_train_df.columns:
+        for c in sup_train_df.columns:
             new_c = c
             if new_c in existing_cols or new_c in used_new:
-                base = f"expert__{c}"
+                base = f"supp__{c}"
                 new_c = base
                 k = 2
                 while new_c in existing_cols or new_c in used_new:
@@ -363,38 +362,36 @@ def main() -> None:
             used_new.add(new_c)
 
         if rename_map:
-            expert_train_df = expert_train_df.rename(columns=rename_map)
-            expert_val_df = expert_val_df.rename(columns=rename_map)
-            print(f"[Expert] renamed {len(rename_map)} colliding expert columns (prefixed with 'expert__').")
+            sup_train_df = sup_train_df.rename(columns=rename_map)
+            sup_val_df = sup_val_df.rename(columns=rename_map)
+            print(f"[Supplementary] renamed {len(rename_map)} colliding columns (prefixed with 'supp__').")
 
-        expert_train_df.index = train_index
-        expert_val_df.index = val_index
-        expert_df = pd.concat([expert_train_df, expert_val_df], axis=0).reindex(df.index)
+        sup_train_df.index = train_index
+        sup_val_df.index = val_index
+        supplementary_df = pd.concat([sup_train_df, sup_val_df], axis=0).reindex(df.index)
 
-        # Treat object columns from expert as categoricals.
-        obj_cols = [c for c in expert_df.columns if expert_df[c].dtype == object]
+        obj_cols = [c for c in supplementary_df.columns if supplementary_df[c].dtype == object]
         if obj_cols:
-            expert_df[obj_cols] = expert_df[obj_cols].astype("category")
+            supplementary_df[obj_cols] = supplementary_df[obj_cols].astype("category")
             categorical_cols = list(dict.fromkeys(categorical_cols + obj_cols))
 
-        expert_cols = list(expert_df.columns)
-        df = pd.concat([df, expert_df], axis=1)
-        print(f"[Expert] appended {len(expert_cols)} expert feature columns. total_cols={df.shape[1]}")
+        supplementary_cols = list(supplementary_df.columns)
+        df = pd.concat([df, supplementary_df], axis=1)
+        print(f"[Supplementary] appended {len(supplementary_cols)} columns. total_cols={df.shape[1]}")
 
-        cache_path = model_out_dir / "expert_feature_cache.pkl"
+        cache_path = model_out_dir / f"{args.supplementary_encoder}_feature_cache.pkl"
         with open(cache_path, "wb") as f:
-            pickle.dump(expert_cache, f, protocol=pickle.HIGHEST_PROTOCOL)
-        print(f"[Expert] saved cache: {cache_path}")
+            pickle.dump(encoder_cache, f, protocol=pickle.HIGHEST_PROTOCOL)
+        print(f"[Supplementary] saved cache: {cache_path}")
+        pass
 
-    # Target transform
     y = df[args.label_col].to_numpy()
     if args.use_log1p_target:
         y = np.log1p(y).astype(np.float32)
 
-    # Prepare X/y (baseline + expert features)
-    feature_cols = keep_cols + expert_cols
+    feature_cols = keep_cols + supplementary_cols
     df_model = df[feature_cols + [args.label_col] + drop_cols].copy()
-    df_model[args.label_col] = y  # replace with transformed target if applicable
+    df_model[args.label_col] = y
 
     X_all, y_all, cat_present = utility.tree_prepare_tabular_matrices(
         df_model,
@@ -408,7 +405,6 @@ def main() -> None:
     X_val = X_all.iloc[val_mask].copy()
     y_val = y_all[val_mask]
 
-    # LightGBM datasets
     dtrain = lgb.Dataset(
         X_train,
         label=y_train,
@@ -470,7 +466,6 @@ def main() -> None:
     dt = time.time() - t0
     print(f"[Train] done in {dt:.1f}s  best_iter={booster.best_iteration}")
 
-    # Save artifacts
     model_path = model_out_dir / "lgbm_model.txt"
     booster.save_model(str(model_path))
     print("[Save] model:", model_path)
@@ -478,27 +473,28 @@ def main() -> None:
     utility.common_save_json({"params": params, **vars(args)}, model_out_dir / "train_args_and_params.json")
     utility.common_save_json(evals_result, model_out_dir / "evals_result.json")
 
-    # TensorBoard logs (evidence for early stopping + traces)
     utility.tree_write_tensorboard_evals(evals_result, tb_dir)
     print("[TB] wrote scalars to:", tb_dir)
 
-    # Simple final metrics
     pred_val = booster.predict(X_val, num_iteration=booster.best_iteration)
     rmse_log = float(np.sqrt(np.mean((pred_val - y_val) ** 2)))
     print(f"[Val] RMSE(log1p)={rmse_log:.6f} (equals RMSLE on original scale if trained on log1p)")
 
-    # If you want to print RMSLE explicitly on original scale:
     if args.use_log1p_target:
         y_val_orig = np.expm1(y_val)
         pred_val_orig = np.expm1(pred_val)
         rmsle = float(np.sqrt(np.mean((np.log1p(pred_val_orig) - np.log1p(y_val_orig)) ** 2)))
         print(f"[Val] RMSLE(original)={rmsle:.6f}")
 
-    # Save feature list used
     feature_list = list(X_train.columns)
-    manifest = {"feature_columns": feature_list, "categorical_columns": cat_present}
-    if args.use_expert_features:
-        manifest["expert_cache_file"] = "expert_feature_cache.pkl"
+    manifest = {
+        "feature_columns": feature_list,
+        "categorical_columns": cat_present,
+        "supplementary_encoder": args.supplementary_encoder,
+        "supplementary_exclude_building_id": bool(args.supplementary_exclude_building_id),
+    }
+    if args.supplementary_encoder != "none":
+        manifest["supplementary_cache_file"] = f"{args.supplementary_encoder}_feature_cache.pkl"
     utility.common_save_json(manifest, model_out_dir / "feature_manifest.json")
     print("[Save] feature manifest:", model_out_dir / "feature_manifest.json")
 

@@ -38,25 +38,36 @@ def extract_expert_features(
     bp_random_state: int = 42,
     **kwargs: Any,
 ) -> pd.DataFrame:
-    """Combine the four expert weather/metadata feature families into one leak-aware feature extractor.
+    """Combine four expert feature families into one leak-aware feature-only extractor.
 
     Parameters
     ----------
     df : pd.DataFrame
-        Full tabular input. The function preserves row order/index and returns only engineered features.
-        Optional `meter_reading` is used only to fit cached balance-point thresholds.
+        Full input table. Row order and index are preserved. The function returns only engineered features.
+        `meter_reading` is optional and is used only to fit cached balance-point thresholds.
     cache : dict | None
-        Mutable cache reused across train/inference. State is namespaced under
-        `cache["extract_expert_features"]` to avoid collisions.
-    ... : various keyword-only hyperparameters
-        Directly expose the original experts' configuration knobs.
+        Mutable cross-call state. Internal keys are namespaced under `cache["extract_expert_features"]`
+        to avoid collisions with other pipelines.
+    meter_bases_c, meter_response_weights, dew_comfort_c, humidity_weight, wind_weight, memory_halflife_hours
+        Hyperparameters for the meter-aware thermal response block.
+    psychrometric_config : Mapping[str, Any] | None
+        Optional override dict for psychrometric weather-load settings.
+    reliability_min_group_size, reliability_robust_z_clip, reliability_temp_gap_soft_cap, reliability_pressure_valid_range
+        Hyperparameters for the contextual reliability/anomaly block.
+    bp_heating_grid_c, bp_cooling_grid_c, bp_enthalpy_grid_kjkg, bp_min_group_size, bp_fit_sample_size,
+    bp_shrinkage, bp_softplus_scale, bp_random_state
+        Hyperparameters for the learned humidity-adjusted balance-point block.
+    **kwargs : Any
+        Reserved for forward compatibility.
 
     Returns
     -------
     pd.DataFrame
-        Sixteen float32 feature columns:
-        thermal_* (4), wx_* (4), contextual_* / missingness / implausibility (4),
-        and bp_* (4).
+        Sixteen float32 feature columns aligned to `df.index`:
+        - thermal_* : meter-aware thermal response features
+        - wx_* : psychrometric weather-load features
+        - *_score / *_anomaly : contextual reliability features
+        - bp_* : learned balance-point features
     """
     if cache is None:
         cache = {}
@@ -64,6 +75,9 @@ def extract_expert_features(
     root_cache = cache.setdefault("extract_expert_features", {})
     eps = 1e-6
 
+    # ------------------------------------------------------------------
+    # Shared utilities used across the expert blocks
+    # ------------------------------------------------------------------
     def _num(data: pd.Series | Any) -> pd.Series:
         return pd.to_numeric(data, errors="coerce")
 
@@ -82,49 +96,6 @@ def extract_expert_features(
         if pd.isna(med):
             med = default
         return s.fillna(float(med)).astype(float)
-
-    def _square_feet_series() -> pd.Series:
-        if "square_feet" in df.columns:
-            return _num(df["square_feet"])
-        if "log_sqft" in df.columns:
-            return np.expm1(_num(df["log_sqft"]))
-        return pd.Series(np.nan, index=df.index, dtype="float64")
-
-    def _year_built_series() -> pd.Series:
-        if "year_built" in df.columns:
-            return _num(df["year_built"])
-        if "year_built_clipped" in df.columns:
-            return _num(df["year_built_clipped"])
-        return pd.Series(np.nan, index=df.index, dtype="float64")
-
-    def _derived_day_off_flag() -> pd.Series:
-        # New schema replacement for the old `is_day_off_or_holiday`.
-        holiday_cols = ["is_holiday_any", "is_na_holiday", "is_eu_holiday"]
-        pieces = []
-        for col in holiday_cols:
-            if col in df.columns:
-                pieces.append(pd.Series(df[col], index=df.index).fillna(False).astype(bool))
-        if "is_weekend" in df.columns:
-            pieces.append(pd.Series(df["is_weekend"], index=df.index).fillna(False).astype(bool))
-        if not pieces:
-            return pd.Series(False, index=df.index, dtype=bool)
-        out = pieces[0].copy()
-        for s in pieces[1:]:
-            out = out | s
-        return out.astype(bool)
-
-    def _derived_hour_series() -> pd.Series:
-        # Prefer timestamp hour; otherwise reconstruct from hour_sin/hour_cos.
-        if "timestamp" in df.columns:
-            ts = pd.to_datetime(df["timestamp"], errors="coerce")
-            if ts.notna().any():
-                return ts.dt.hour.astype("float64")
-        if "hour_sin" in df.columns and "hour_cos" in df.columns:
-            angle = np.arctan2(_num(df["hour_sin"]).to_numpy(dtype=float), _num(df["hour_cos"]).to_numpy(dtype=float))
-            hour = np.mod(angle, 2.0 * np.pi) * 24.0 / (2.0 * np.pi)
-            hour = np.mod(np.rint(hour), 24.0)
-            return pd.Series(hour, index=df.index, dtype="float64")
-        return pd.Series(np.nan, index=df.index, dtype="float64")
 
     def _softplus(x: np.ndarray, scale: float = 1.0, clip: float = 50.0) -> np.ndarray:
         z = np.clip(np.asarray(x, dtype=float) / max(scale, 1e-6), -clip, clip)
@@ -147,14 +118,18 @@ def extract_expert_features(
         return 1.006 * air_c + humidity_ratio * (2501.0 + 1.86 * air_c)
 
     def _enthalpy_kjkg_from_hpa(t_c: pd.Series, td_c: pd.Series, p_hpa: pd.Series) -> pd.Series:
+        # Tetens-style vapor pressure + humidity ratio + moist-air enthalpy
         t = _num(t_c).astype(float)
         td = _num(td_c).astype(float)
         p = _num(p_hpa).astype(float)
+
         e = 6.112 * np.exp((17.67 * td) / (td + 243.5))
         e = np.clip(e, 0.01, None)
+
         denom = np.maximum(p - e, 1.0)
         w = 0.621945 * e / denom
         w = np.clip(w, 0.0, 0.08)
+
         h = 1.006 * t + w * (2501.0 + 1.86 * t)
         return pd.Series(h, index=t.index)
 
@@ -177,6 +152,7 @@ def extract_expert_features(
             how="left",
             suffixes=("", "__med"),
         )
+
         abs_dev_cols: list[str] = []
         for c in cols:
             dev_col = f"{c}__absdev"
@@ -194,6 +170,7 @@ def extract_expert_features(
         stats = stats[[col for c in cols for col in (f"{c}__med", f"{c}__mad")]]
         stats["__count"] = counts
 
+        # Small groups fall back to global robust statistics.
         small_groups = stats["__count"] < int(min_group_size)
         stat_cols = [c for c in stats.columns if c != "__count"]
         stats.loc[small_groups, stat_cols] = np.nan
@@ -213,44 +190,20 @@ def extract_expert_features(
     def _score_from_group_stats(frame: pd.DataFrame, fit: dict[str, Any], clip: float) -> pd.Series:
         keys = fit["keys"]
         cols = fit["cols"]
-        # Old code kept here for reference. The bug is that `joined` gets a fresh RangeIndex,
-        # while `frame[c]` keeps the original index. Pandas then aligns by labels during
-        # subtraction, which can expand the result length.
-        #
-        # joined = frame[keys].merge(fit["stats"], on=keys, how="left")
+        joined = frame[keys].merge(fit["stats"], on=keys, how="left")
 
-        # score_parts = []
-        # for c in cols:
-        #     x = _num(frame[c])
-        #     med = _num(joined[f"{c}__med"]).fillna(float(fit["global_med"][c]))
-        #     mad = _num(joined[f"{c}__mad"]).fillna(float(fit["global_mad"][c]))
-        #     mad = mad.replace(0.0, np.nan).fillna(1.0)
-
-        #     x_filled = x.fillna(med)
-        #     rz = (x_filled - med).abs() / (mad + eps)
-        #     score_parts.append(_compress_score(rz, clip))
-
-        # return pd.Series(np.mean(np.vstack(score_parts), axis=0), index=frame.index)
-        joined = frame[keys].merge(fit["stats"], on=keys, how="left", sort=False)
-        joined.index = frame.index
-
-        score_parts: list[np.ndarray] = []
+        score_parts = []
         for c in cols:
             x = _num(frame[c])
             med = _num(joined[f"{c}__med"]).fillna(float(fit["global_med"][c]))
             mad = _num(joined[f"{c}__mad"]).fillna(float(fit["global_mad"][c]))
             mad = mad.replace(0.0, np.nan).fillna(1.0)
 
-            x_np = x.to_numpy(dtype=float)
-            med_np = med.to_numpy(dtype=float)
-            mad_np = mad.to_numpy(dtype=float)
-
-            x_filled_np = np.where(np.isnan(x_np), med_np, x_np)
-            rz = np.abs(x_filled_np - med_np) / (mad_np + eps)
+            x_filled = x.fillna(med)
+            rz = (x_filled - med).abs() / (mad + eps)
             score_parts.append(_compress_score(rz, clip))
 
-        stacked = np.vstack(score_parts)
-        return pd.Series(np.mean(stacked, axis=0), index=frame.index)
+        return pd.Series(np.mean(np.vstack(score_parts), axis=0), index=frame.index)
 
     def _sample_frame(frame: pd.DataFrame, n: int, random_state: int) -> pd.DataFrame:
         if len(frame) <= n:
@@ -273,6 +226,8 @@ def extract_expert_features(
 
         best_loss = np.inf
         best = dict(fallback)
+
+        # Grid-search the threshold triplet exactly as the expert design intends.
         for hb in heat_grid:
             heat_load = np.clip(hb - t, 0.0, None)
             for cb in cool_grid:
@@ -307,17 +262,19 @@ def extract_expert_features(
         "air_temperature",
         "dew_temperature",
         "wind_speed",
+        "square_feet",
+        "year_built",
         "floor_count",
+        "is_day_off_or_holiday",
     ]
     missing_e1 = [c for c in required_e1 if c not in df.columns]
     if missing_e1:
         raise ValueError(f"Missing required columns for thermal response features: {missing_e1}")
 
     e1_cache = root_cache.setdefault("meter_aware_thermal_response", {})
-    e1_state_key = "fit_state"
-    if e1_state_key not in e1_cache:
-        square_feet_fit = _square_feet_series()
-        year_built_fit = _year_built_series()
+    if "fit_state" not in e1_cache:
+        square_feet_fit = _num(df["square_feet"])
+        year_built_fit = _num(df["year_built"])
         floor_count_fit = _num(df["floor_count"])
 
         if "timestamp" in df.columns:
@@ -328,7 +285,7 @@ def extract_expert_features(
             year_ref = int(valid_years.max()) if not valid_years.empty else 2020
 
         log_size_fit = np.log1p(square_feet_fit.clip(lower=0))
-        e1_cache[e1_state_key] = {
+        e1_cache["fit_state"] = {
             "square_feet_median": float(square_feet_fit.median(skipna=True)) if square_feet_fit.notna().any() else 0.0,
             "year_built_median": (
                 float(year_built_fit.median(skipna=True)) if year_built_fit.notna().any() else float(year_ref - 30)
@@ -338,17 +295,19 @@ def extract_expert_features(
             "year_ref": year_ref,
         }
 
-    e1_state = e1_cache[e1_state_key]
+    e1_state = e1_cache["fit_state"]
+
     meter = _num(df["meter"]).fillna(-1).astype(int)
     air_t = _num(df["air_temperature"]).astype(float)
     dew_t = _num(df["dew_temperature"]).astype(float)
     wind = _num(df["wind_speed"]).astype(float)
 
-    square_feet = _square_feet_series().fillna(e1_state["square_feet_median"]).clip(lower=0)
-    year_built = _year_built_series().fillna(e1_state["year_built_median"])
+    square_feet = _num(df["square_feet"]).fillna(e1_state["square_feet_median"]).clip(lower=0)
+    year_built = _num(df["year_built"]).fillna(e1_state["year_built_median"])
     floor_count = _num(df["floor_count"]).fillna(e1_state["floor_count_median"]).clip(lower=1)
-    is_day_off = _derived_day_off_flag()
+    is_day_off = pd.Series(df["is_day_off_or_holiday"], index=df.index).fillna(False).astype(bool)
 
+    # Weather imputations remain current-call median based, matching the expert design.
     air_t = air_t.fillna(float(air_t.median(skipna=True)) if air_t.notna().any() else 20.0)
     dew_t = dew_t.fillna(float(dew_t.median(skipna=True)) if dew_t.notna().any() else 10.0)
     wind = wind.fillna(float(wind.median(skipna=True)) if wind.notna().any() else 0.0).clip(lower=0)
@@ -363,6 +322,7 @@ def extract_expert_features(
     heat_weight = meter.map(heat_weight_map).fillna(1.0).astype(float)
     cool_weight = meter.map(cool_weight_map).fillna(1.0).astype(float)
 
+    # Metadata-derived archetype scaling.
     log_size = np.log1p(square_feet)
     size_scale = (log_size / max(e1_state["log_size_median"], 1e-6)).clip(lower=0.60, upper=1.80)
     building_age = (e1_state["year_ref"] - year_built).clip(lower=0, upper=120)
@@ -383,6 +343,7 @@ def extract_expert_features(
     )
     moisture_infiltration_stress = np.log1p(dew_excess * archetype_scale * (1.0 + wind_weight * wind_term))
 
+    # Past-only temperature memory feature.
     if "timestamp" in df.columns:
         ts = pd.to_datetime(df["timestamp"], errors="coerce")
         temp_table = (
@@ -400,9 +361,9 @@ def extract_expert_features(
             .mean()
             .shift(1)
         )
+
         fallback_temp = float(temp_table.median()) if not temp_table.empty else float(air_t.median())
-        mapped_baseline = ts.map(past_baseline.to_dict())
-        baseline_temp = pd.to_numeric(mapped_baseline, errors="coerce").fillna(fallback_temp)
+        baseline_temp = pd.to_numeric(ts.map(past_baseline.to_dict()), errors="coerce").fillna(fallback_temp)
         temp_shock = (air_t - baseline_temp).abs()
     else:
         fallback_temp = float(air_t.median(skipna=True)) if air_t.notna().any() else 20.0
@@ -423,7 +384,7 @@ def extract_expert_features(
     )
 
     # ------------------------------------------------------------------
-    # Expert 2: psychrometric weather load features
+    # Expert 2: psychrometric weather-load features
     # ------------------------------------------------------------------
     cfg: dict[str, Any] = {
         "cooling_base_c": 18.0,
@@ -474,9 +435,9 @@ def extract_expert_features(
     precip = _fill_with_median(_series("precip_depth_1_hr"), 0.0).clip(lower=0.0)
     cloud = _fill_with_median(_series("cloud_coverage"), 4.0).clip(lower=0.0, upper=8.0)
 
-    sqft = _fill_with_median(_square_feet_series(), 1.0).clip(lower=1.0)
+    sqft = _fill_with_median(_series("square_feet"), 1.0).clip(lower=1.0)
     floors = _fill_with_median(_series("floor_count"), 1.0).clip(lower=1.0)
-    year_built2 = _fill_with_median(_year_built_series(), 2000.0)
+    year_built2 = _fill_with_median(_series("year_built"), 2000.0)
     primary_use = _series("primary_use", default="unknown").astype("string").fillna("unknown").str.strip().str.lower()
     meter_num = _num(_series("meter")).round().astype("Int64")
 
@@ -581,6 +542,8 @@ def extract_expert_features(
     required_e3 = [
         "meter",
         "primary_use",
+        "square_feet",
+        "year_built",
         "floor_count",
         "air_temperature",
         "cloud_coverage",
@@ -589,12 +552,14 @@ def extract_expert_features(
         "sea_level_pressure",
         "wind_direction",
         "wind_speed",
+        "hour",
+        "is_day_off_or_holiday",
     ]
     missing_e3 = [c for c in required_e3 if c not in df.columns]
     if missing_e3:
         raise KeyError(f"Missing required columns for contextual reliability features: {missing_e3}")
 
-    weather_context_keys = ["meter", "hour", "is_day_off_or_holiday_proxy"]
+    weather_context_keys = ["meter", "hour", "is_day_off_or_holiday"]
     weather_cols = [
         "air_temperature",
         "dew_temperature",
@@ -607,8 +572,8 @@ def extract_expert_features(
     structure_cols = ["log_square_feet", "building_age", "floor_count"]
 
     work = pd.DataFrame(index=df.index)
-    work["square_feet"] = _square_feet_series()
-    work["year_built"] = _year_built_series()
+    work["square_feet"] = _num(df["square_feet"])
+    work["year_built"] = _num(df["year_built"])
     work["floor_count"] = _num(df["floor_count"])
     work["air_temperature"] = _num(df["air_temperature"])
     work["cloud_coverage"] = _num(df["cloud_coverage"])
@@ -619,8 +584,8 @@ def extract_expert_features(
     work["wind_speed"] = _num(df["wind_speed"])
     work["meter"] = df["meter"]
     work["primary_use"] = df["primary_use"]
-    work["hour"] = _derived_hour_series()
-    work["is_day_off_or_holiday_proxy"] = _derived_day_off_flag()
+    work["hour"] = df["hour"]
+    work["is_day_off_or_holiday"] = df["is_day_off_or_holiday"].fillna(False)
 
     if "timestamp" in df.columns and pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
         row_year = df["timestamp"].dt.year.astype("float64")
@@ -631,6 +596,7 @@ def extract_expert_features(
     work["log_square_feet"] = np.log1p(work["square_feet"].clip(lower=0))
     work["precip_depth_1_hr_log"] = np.sign(work["precip_depth_1_hr"]) * np.log1p(work["precip_depth_1_hr"].abs())
 
+    # Feature 1: metadata missingness
     meta_missing = pd.concat(
         [
             work["square_feet"].isna().astype("float64"),
@@ -641,6 +607,7 @@ def extract_expert_features(
     )
     meta_missing_score = meta_missing.mean(axis=1)
 
+    # Feature 2: physical/range implausibility
     pressure_low, pressure_high = reliability_pressure_valid_range
     dew_excess2 = np.clip(
         (work["dew_temperature"] - work["air_temperature"]) / max(reliability_temp_gap_soft_cap, eps),
@@ -665,22 +632,31 @@ def extract_expert_features(
     )
     weather_implausibility_score = pd.Series(implausibility_stack.mean(axis=0), index=df.index)
 
+    # Fit or reuse robust context stats.
     e3_cache = root_cache.setdefault("contextual_reliability_spike", {})
     if "weather_fit" not in e3_cache:
-        weather_fit_frame = work[weather_context_keys + weather_cols].copy()
         e3_cache["weather_fit"] = _fit_group_stats(
-            weather_fit_frame, weather_context_keys, weather_cols, reliability_min_group_size
+            work[weather_context_keys + weather_cols].copy(),
+            weather_context_keys,
+            weather_cols,
+            reliability_min_group_size,
         )
-        structure_fit_frame = work[structure_keys + structure_cols].copy()
         e3_cache["structure_fit"] = _fit_group_stats(
-            structure_fit_frame, structure_keys, structure_cols, reliability_min_group_size
+            work[structure_keys + structure_cols].copy(),
+            structure_keys,
+            structure_cols,
+            reliability_min_group_size,
         )
 
     contextual_weather_anomaly = _score_from_group_stats(
-        work[weather_context_keys + weather_cols], e3_cache["weather_fit"], reliability_robust_z_clip
+        work[weather_context_keys + weather_cols],
+        e3_cache["weather_fit"],
+        reliability_robust_z_clip,
     )
     contextual_structure_anomaly = _score_from_group_stats(
-        work[structure_keys + structure_cols], e3_cache["structure_fit"], reliability_robust_z_clip
+        work[structure_keys + structure_cols],
+        e3_cache["structure_fit"],
+        reliability_robust_z_clip,
     )
 
     out_parts.append(
@@ -696,7 +672,7 @@ def extract_expert_features(
     )
 
     # ------------------------------------------------------------------
-    # Expert 4: meter-specific humidity-adjusted balance point features
+    # Expert 4: meter-specific humidity-adjusted balance-point features
     # ------------------------------------------------------------------
     required_e4 = [
         "meter",
@@ -725,15 +701,16 @@ def extract_expert_features(
 
     if "learned_state" not in e4_cache:
         learned: dict[str, Any] = {"meter_params": {}, "group_params": {}, "medians": {}}
+
         medians = {
             "air_temperature": float(_num(df["air_temperature"]).median()),
             "dew_temperature": float(_num(df["dew_temperature"]).median()),
             "sea_level_pressure": float(_num(df["sea_level_pressure"]).median()),
             "wind_speed": float(_num(df["wind_speed"]).median()),
             "cloud_coverage": float(_num(df["cloud_coverage"]).median()),
-            "square_feet": float(_square_feet_series().median()),
+            "square_feet": float(_num(df["square_feet"]).median()),
             "floor_count": float(_num(df["floor_count"]).median()),
-            "year_built": float(_year_built_series().median()),
+            "year_built": float(_num(df["year_built"]).median()),
         }
         learned["medians"] = medians
 
@@ -753,13 +730,19 @@ def extract_expert_features(
                 )
                 fit_df["_enth"] = _enthalpy_kjkg_from_hpa(fit_df["_temp"], fit_df["_dew"], fit_df["_press"])
 
+                # Meter-level threshold fit.
                 for meter_value, group in fit_df.groupby("_meter", observed=True, sort=False):
                     prior = dict(meter_priors.get(str(meter_value), meter_priors["__MISSING__"]))
                     sample = _sample_frame(group, bp_fit_sample_size, bp_random_state)
                     learned["meter_params"][str(meter_value)] = _fit_thresholds(
-                        sample, bp_heating_grid_c, bp_cooling_grid_c, bp_enthalpy_grid_kjkg, prior
+                        sample,
+                        bp_heating_grid_c,
+                        bp_cooling_grid_c,
+                        bp_enthalpy_grid_kjkg,
+                        prior,
                     )
 
+                # Group-level threshold fit with shrinkage toward the meter-level prior.
                 for (meter_value, primary_use_value), group in fit_df.groupby(
                     ["_meter", "_primary_use"], observed=True, sort=False
                 ):
@@ -768,9 +751,11 @@ def extract_expert_features(
 
                     meter_value = str(meter_value)
                     primary_use_value = str(primary_use_value)
+
                     meter_base = dict(
                         learned["meter_params"].get(
-                            meter_value, meter_priors.get(meter_value, meter_priors["__MISSING__"])
+                            meter_value,
+                            meter_priors.get(meter_value, meter_priors["__MISSING__"]),
                         )
                     )
                     local_heat = _local_grid(meter_base["heat_bp"], bp_heating_grid_c, radius=1)
@@ -797,14 +782,15 @@ def extract_expert_features(
         "sea_level_pressure": medians.get("sea_level_pressure", float(_num(df["sea_level_pressure"]).median())),
         "wind_speed": medians.get("wind_speed", float(_num(df["wind_speed"]).median())),
         "cloud_coverage": medians.get("cloud_coverage", float(_num(df["cloud_coverage"]).median())),
-        "square_feet": medians.get("square_feet", float(_square_feet_series().median())),
+        "square_feet": medians.get("square_feet", float(_num(df["square_feet"]).median())),
         "floor_count": medians.get("floor_count", float(_num(df["floor_count"]).median())),
-        "year_built": medians.get("year_built", float(_year_built_series().median())),
+        "year_built": medians.get("year_built", float(_num(df["year_built"]).median())),
     }
 
     meter_params = learned.get("meter_params", {})
     group_params = learned.get("group_params", {})
 
+    # Build vectorized lookup tables for fitted or prior thresholds.
     meter_rows = []
     all_meter_keys = set(meter_priors.keys()) | set(meter_params.keys())
     for mk in all_meter_keys:
@@ -832,7 +818,8 @@ def extract_expert_features(
             }
         )
     group_param_df = pd.DataFrame(
-        group_rows, columns=["_meter", "_primary_use", "heat_bp_group", "cool_bp_group", "enth_bp_group"]
+        group_rows,
+        columns=["_meter", "_primary_use", "heat_bp_group", "cool_bp_group", "enth_bp_group"],
     )
 
     keys = pd.DataFrame(
@@ -868,16 +855,19 @@ def extract_expert_features(
     press4 = _num(df["sea_level_pressure"]).fillna(medians["sea_level_pressure"]).astype(float)
     wind4 = _num(df["wind_speed"]).fillna(medians["wind_speed"]).astype(float)
     cloud4 = _num(df["cloud_coverage"]).fillna(medians["cloud_coverage"]).astype(float)
-    sqft4 = _square_feet_series().fillna(medians["square_feet"]).clip(lower=1.0).astype(float)
+    sqft4 = _num(df["square_feet"]).fillna(medians["square_feet"]).clip(lower=1.0).astype(float)
     floors4 = _num(df["floor_count"]).fillna(medians["floor_count"]).clip(lower=1.0).astype(float)
-    year_built4 = _year_built_series().fillna(medians["year_built"]).astype(float)
+    year_built4 = _num(df["year_built"]).fillna(medians["year_built"]).astype(float)
 
     enth = _enthalpy_kjkg_from_hpa(temp, dew4, press4).astype(float)
 
+    # Metadata modulation remains dense and low-cardinality.
     size_norm = (np.log1p(sqft4) - np.log1p(max(medians["square_feet"], 1.0))) / 1.25
     size_norm = np.clip(size_norm, -2.5, 2.5)
+
     floor_norm = (floors4 - max(medians["floor_count"], 1.0)) / max(medians["floor_count"], 1.0)
     floor_norm = np.clip(floor_norm, -2.5, 2.5)
+
     age_norm = (medians["year_built"] - year_built4) / 30.0
     age_norm = np.clip(age_norm, -2.5, 2.5)
 

@@ -20,7 +20,7 @@ $ModelKey       = "base1"           # only used when ControllerName = "ppo"
 $ModelTable = @{
     "base1" = @{
         # E:\repos\LLM_traffic_query\tests\sumo_traci\models_all\models_22+22+_2\sumo_ppo_seed172_exp1_600ep_1_1771926979__J1.pt
-        Checkpoint = "E:\repos\LLM_traffic_query\tests\sumo_traci\models_all\models_3232skewed_1\sumo_ppo_seed172_base_r_p_enc_bounded_v2_reward_pressure_1774406863__J0.pt"
+        Checkpoint = "E:\repos\LLM_traffic_query\tests\sumo_traci\models_all\models_2L3S23O_1\sumo_ppo_seed172_litonly_ub_enc_frap_state_reward_unbiased_simple_v1_1775043165__J4.pt"
         LogTag     = "b"
     }
     "exp1" = @{
@@ -35,10 +35,10 @@ $ModelTable = @{
 # --------------------------------------------------
 $Scenario = @{
     # Sumocfg = "E:\Sumo\sumo_maps\4leg_3LR23LR2\4leg_3LR23LR2.sumocfg" "E:\Sumo\sumo_maps\4leg_22+22+\4leg_22+22+.sumocfg"
-    # "E:\Sumo\sumo_maps\4leg_3232skewed\4leg_3232skewed.sumocfg"
-    Sumocfg = "E:\Sumo\sumo_maps\4leg_3232skewed\4leg_3232skewed.sumocfg"
-    # J0: 3232 skewed; J1: 3LR23LR2
-    TlsId   = "J0"
+    # "E:\Sumo\sumo_maps\4leg_3232skewed\4leg_3232skewed.sumocfg" "E:\Sumo\sumo_maps\4leg_2L3S23O\4leg_2L3S23O.sumocfg"
+    Sumocfg = "E:\Sumo\sumo_maps\4leg_2L3S23O\4leg_2L3S23O.sumocfg"
+    # J0: 3232 skewed; J1: 3LR23LR2; J4: 2L3S23O
+    TlsId   = "J4"
 }
 
 # --------------------------------------------------
@@ -48,7 +48,8 @@ $EvalArgs = @(
     "--controller-name", $ControllerName,
     # "E:\repos\LLM_traffic_query\tests\sumo_traci\eval_results\3LR23LR2\ub", 
     # "E:\repos\LLM_traffic_query\tests\sumo_traci\eval_results\3232skewed\ub",
-    "--log-dir", "E:\repos\LLM_traffic_query\tests\sumo_traci\eval_results\3232skewed\ub",
+    # "E:\repos\LLM_traffic_query\tests\sumo_traci\eval_results\2L3S23O\ub",
+    "--log-dir", "E:\repos\LLM_traffic_query\tests\sumo_traci\eval_results\2L3S23O\ub",
     "--episodes", "200",
     "--episode-len", "3600",
     "--sumo-seed", "10086",

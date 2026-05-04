@@ -202,11 +202,9 @@ def main() -> None:
     run_name = build_default_run_name(args)
     out_dir = Path(args.out_dir)
     data_path = Path(args.data_parquet)
-    # model_out_dir = Path(args.out_dir + f"/models/{build_default_run_name(args)}")
     model_out_dir = out_dir / "models" / run_name
     utility.common_ensure_dir(model_out_dir)
 
-    run_name = build_default_run_name(args)
     tb_root = out_dir / "tb_lgbm"
     tb_dir = tb_root / run_name
     utility.common_ensure_dir(tb_dir)
