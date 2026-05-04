@@ -1,1 +1,0 @@
-python .\prompt_assembler.py --template LLM_query_template.yaml --ascii 
