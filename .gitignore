@@ -20,6 +20,7 @@ submissions
 out.txt
 memo.txt
 **/energy_prediction/results/
+**/auto_prompting/runs/
 
 *.ftr
 
