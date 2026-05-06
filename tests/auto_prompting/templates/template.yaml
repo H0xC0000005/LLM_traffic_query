@@ -1,0 +1,198 @@
+schema_version: prompt_templates.v1
+
+templates:
+  expert:
+    propose_topic:
+      messages:
+        - role: system
+          content: |
+            You are a machine learning expert, and you are in charge of analyzing a machine learning downstream problem 
+            in the aspect of feature engineering.
+        - role: user
+          content: |
+            You are an expert in {{ task_name }} analysis. There are other experts who are also experts in {{ task_name }} analysis.
+            {{ general_prior }}
+            First of all, each expert should propose a general aspect of the {{ task_name }} to be analyzed. 
+            Each expert can choose any field as long as it is related to forming a good {{ task_name }} model (based on task specification). 
+            There should be no preference based on the importance of these aspects to form a good model.
+            Now you should propose your aspect. You should provide the following:
+            1,  Your proposed aspect with just a name or at most a short summary in a sentence.
+            2, A short summary stating how your proposed aspect is related to the task, no more than 100 words.
+            You should return a single yaml with the following format:
+            '''yaml
+            aspect: <your proposed aspect name> 
+            aspect_summary: <your proposed aspect summary>
+            '''
+            Remember that you should consider the provided scope of problems that the group is going to analyze, and your aspect should work well in the scope.
+
+
+    refine_topic:
+      messages:
+        - role: user
+          content: |
+            After the whole group's proposals have been collected, some of the experts propose very similar topics to your proposal. 
+            You should adjust your proposal by making it more fine-grained, aiming at a more specific or slightly transformed aspect, 
+            while largely keeping your previously proposed aspect. You should choose the next improved aspect with some random chances, 
+            hoping not to collide with other similar experts by chance.
+            Your current topic:
+            {{ current_topic }}
+            Your proposed topic is classified into the following group based on proposal similarity:
+            {{ current_cluster }}
+            And you should also avoid colliding with fixed topics from other groups:
+            {{ fixed_topics }}
+            Now please give your new proposal of the fine-grained aspect. You should remove the topic aspect that is mentioned in the cluster so that you have disjoint topic with your peers. You should provide the following:
+            1,  Your new proposed aspect with just a name or at most a short summary in a sentence.
+            2, A short summary stating how your proposed aspect is a fine-grained version of your previous proposal, no more than 100 words.
+            You should return a single yaml with the following format:
+            '''yaml
+            aspect: <your proposed aspect name>
+            aspect_summary: <your proposed aspect summary>
+            '''
+    
+    switch_topic:
+      messages:
+        - role: user
+          content: |
+            After the whole group's proposals have been collected, some of the experts propose very similar topics to your proposal. 
+            You should choose another aspect different from the topics in the cluster, 
+            while keeping it related to the task, and hoping not to collide with other similar experts by chance.
+            Your current topic:
+            {{ current_topic }}
+            Your proposed topic is classified into the following group based on proposal similarity:
+            {{ current_cluster }}
+            And you should also avoid colliding with fixed topics from other groups:
+            {{ fixed_topics }}
+            Now please give your new proposal of the different aspect. You should remove the topic aspect that is mentioned in the cluster so that you have disjoint topic with your peers. You should provide the following:
+            1, Your new proposed aspect with just a name or at most a short summary in a sentence.
+            2, A short summary stating how your proposed aspect is related to the task, no more than 100 words.
+            You should return a single yaml with the following format:
+            '''yaml
+            aspect: <your proposed aspect name>
+            aspect_summary: <your proposed aspect summary>
+            '''
+
+
+
+  judge:
+    judge_topics:
+      messages:
+        - role: user
+          content: |
+            You are an analyst expert within a group of experts comprising experts like you. Your group is working on {{ task_name }}. 
+            Your peers are working on proposing fine-grained aspects of the problem and producing good feature extractors based on each proposal. 
+            Your task is to cluster proposals of different experts into groups based on the similarity of topics. 
+            You will be provided the title and a short summary of each expert. You should output the clusters in the YAML format. 
+            For each cluster that has more than one topic, you should find the one with the most topic coverage and flag as “keep”. 
+            Moreover, if you find that a topic has a part of distinct semantics and can be refined to avoid peer topics in the same cluster, 
+            you should denote that topic with "refine" flag. Notice that, however, 
+            each cluster should have at most one of topics that is granted “refine” flag, and the rest should have no “refine” flag. 
+            In the case where multiple topics are reasonable candidates to be granted “refine” flag, 
+            you should pick one that after removing the intersected part with other topics it still has the best semantics. 
+            Moreover, you should be very cautious in assigning the “refine” flag, and a cluster without “refine” flag is completely OK; 
+            you should only assign “refine” flag if the topic has a non-overlapping part with other items that has similar granularity, 
+            or size of the scope, to the kept topic in the cluster.
+            A toy example of how to play World of Tanks well is provided. Please notice that, however, your clustering task is an open task, 
+            so please adopt any clustering method as long as you can name each cluster with semantic and logical title.
+            // 
+            Task: What are the methods to play World Of Tanks well such that a player can get a higher winning rate?
+
+            Inputs:
+            ```yaml
+            topics:
+              - expert_id: expert_01
+                aspect: Strike chances and engagement consideration
+                aspect_summary: Good players usually have good knowledge about when and where to shoot at the enemy while keeping themselves safe.
+
+              - expert_id: expert_02
+                aspect: Knowledge about armor and mobility
+                aspect_summary: Knowledge about enemy armor and mobility can help a player quickly find weak spots of the enemy, gaining the initiative.
+
+              - expert_id: expert_03
+                aspect: Maneuveur options
+                aspect_summary: Choosing the right time and method to maneuveur across the map can often create crossfires, backblows and pincer attacks, which greatly increase the team’s winning chances at a strategic level.
+
+              - expert_id: expert_04
+                aspect: Engagement pace management
+                aspect_summary: Changing the pace can gain a tactical advantage, especially in close-quarter combat. The enemy can also be overrun if they cannot match a fast pace.
+
+              - expert_id: expert_05
+                aspect: Choose the right combat style based on the specific vehicle
+                aspect_summary: Choosing the right combat style can help the player to fully utilize their own vehicle's potential, and grabbing as many tactical chances as possible.
+            ```
+            Outputs:
+            ```yaml
+            no_overlap: false
+
+            clusters:
+              - cluster_name: Strategic knowledge
+                reason: Maneuvering across the map is a strategic option, different from per-position or per-vehicle skills.
+                members:
+                  - expert_id: expert_03
+                    aspect: Maneuveur options
+                    aspect_summary: Choosing the right time and method to maneuveur across the map can often create crossfires, backblows and pincer attacks, which greatly increase the team’s winning chances at a strategic level.
+
+              - cluster_name: Tactical skills, knowledge, and instinct
+                reason: Engagement and pace are tactical combat skills, different from map-level strategy and vehicle-stat knowledge.
+                members:
+                  - expert_id: expert_04
+                    aspect: Engagement pace management
+                    aspect_summary: Changing the pace can gain a tactical advantage, especially in close-quarter combat. The enemy can also be overrun if they cannot match a fast pace.
+
+                  - expert_id: expert_01
+                    aspect: Strike chances and engagement consideration
+                    aspect_summary: Good players usually have good knowledge about when and where to shoot at the enemy while keeping themselves safe.
+
+              - cluster_name: Knowledge about basic stats of vehicles
+                reason: These topics concern vehicle-specific knowledge and combat-style adaptation, independent of any specific engagement.
+                members:
+                  - expert_id: expert_02
+                    aspect: Knowledge about armor and mobility
+                    aspect_summary: Knowledge about enemy armor and mobility can help a player quickly find weak spots of the enemy, gaining the initiative.
+
+                  - expert_id: expert_05
+                    aspect: Choose the right combat style based on the specific vehicle
+                    aspect_summary: Choosing the right combat style can help the player to fully utilize their own vehicle's potential, and grabbing as many tactical chances as possible.
+
+            flags:
+              - expert_id: expert_04
+                aspect: Engagement pace management
+                action: keep
+                reason: This topic has broader tactical coverage within the cluster and can anchor the tactical-skill group.
+
+              - expert_id: expert_01
+                aspect: Strike chances and engagement consideration
+                action: refine
+                reason: This topic overlaps with engagement pace but can be refined toward shot timing, exposure control, and firing-window selection.
+
+              - expert_id: expert_05
+                aspect: Choose the right combat style based on the specific vehicle
+                action: keep
+                reason: This topic covers broader vehicle-dependent playstyle adaptation than armor and mobility knowledge alone.
+
+              - expert_id: expert_02
+                aspect: Knowledge about armor and mobility
+                action: switch
+                reason: This topic is mostly contained within the broader vehicle-specific combat-style topic and has limited residual scope after overlap removal.
+            ```
+            A final note on output format. As you see in the example, you should output the YAML in the following format (with template elements in angled brackets):
+            ```yaml
+            no_overlap: true/false
+
+            clusters:
+              - cluster_name: <semantic cluster name>
+                reason: <short reason why this cluster is semantically distinct>
+                members:
+                  - expert_id: <expert id>
+                    aspect: <expert aspect>
+                    aspect_summary: <expert aspect summary>
+              ...
+
+            flags:
+              - expert_id: <expert id>
+                aspect: <expert aspect>
+                action: keep/refine/switch
+                reason: <short reason for this action>
+              ...
+            ```
+            You should also provide a short description of why this cluster is different from others in a YAML comment (no more than 30 words). The comment should be written on an individual line prior to the cluster name.
+            Next, I will provide a group of expert outputs in each prompt. You should produce a clustering per prompt. Please return “Roger” and I will send you the first expert output prompt.
