@@ -3,9 +3,11 @@ task_id: tsc
 variables:
   task_name: traffic signal control (TSC)
   general_prior: |
-    The task is to make a good signal plan for an isolated intersection. There will be no pedestrians, and only vehicles should be considered.
+    The task is to produce effective state representations of the intersection to enhance the performance of a good reinforcement learning model aiming at good phase control for an isolated intersection. 
+    Basic encodings such as queue length, waiting time, and phase serve conditions are provided.
+    There will be no pedestrians, and only vehicles should be considered. 
     Incoming flow is free flow.
-    You are working together with peers to analyze specific factors of an isolated intersection to design a good signal plan.
+    You are working together with peers to analyze specific factors of an isolated intersection to produce effective state representations.
   scenario_prior: |
     The scenario is always right-hand side driving.
     The intersection always contains a single group of traffic lights. Composite intersections, roundabouts, and multiple-signal-group intersections are outside the scope.

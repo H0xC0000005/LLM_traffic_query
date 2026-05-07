@@ -40,6 +40,71 @@ def validate_expert_topic(obj: Any) -> dict[str, str]:
     return {"aspect": aspect.strip(), "aspect_summary": aspect_summary.strip()}
 
 
+def validate_feature_plan(obj: Any) -> dict[str, Any]:
+    if not isinstance(obj, dict):
+        raise ValueError("Feature-plan output must be a YAML mapping.")
+    plan = obj.get("feature_plan")
+    if not isinstance(plan, dict):
+        raise ValueError("Feature-plan output must contain mapping field: feature_plan.")
+    required = [
+        "feature_family_name",
+        "responsible_topic_application",
+        "referenced_approaches",
+        "design_rationale",
+        "required_observables",
+        "computation_strategy",
+        "expected_outputs",
+    ]
+    missing = [k for k in required if k not in plan]
+    if missing:
+        raise ValueError(f"feature_plan is missing required fields: {missing}")
+    return obj
+
+
+def validate_expert_feature_code(obj: Any) -> dict[str, Any]:
+    if not isinstance(obj, dict):
+        raise ValueError("Expert feature-code output must be a YAML mapping.")
+    required = [
+        "implementation_status",
+        "feature_code",
+        "feature_outputs",
+        "required_inputs",
+        "dependencies",
+        "unresolved_items",
+        "scenario_reflection",
+        "alignment_notes",
+        "assembler_notes",
+    ]
+    missing = [k for k in required if k not in obj]
+    if missing:
+        raise ValueError(f"Expert feature-code output is missing required fields: {missing}")
+    if not isinstance(obj.get("feature_code"), str) or not obj["feature_code"].strip():
+        raise ValueError("Expert feature-code output must contain non-empty string field: feature_code.")
+    if not isinstance(obj.get("feature_outputs"), list):
+        raise ValueError("Expert feature-code output must contain list field: feature_outputs.")
+    return obj
+
+
+def validate_assembler_result(obj: Any) -> dict[str, Any]:
+    if not isinstance(obj, dict):
+        raise ValueError("Assembler output must be a YAML mapping.")
+    code = obj.get("feature_engineering_function_code")
+    mapping = obj.get("expert_feature_mapping")
+    if not isinstance(code, str) or not code.strip():
+        raise ValueError("Assembler output must contain non-empty string field: feature_engineering_function_code.")
+    if not isinstance(mapping, list):
+        raise ValueError("Assembler output must contain list field: expert_feature_mapping.")
+    for i, item in enumerate(mapping):
+        if not isinstance(item, dict):
+            raise ValueError(f"expert_feature_mapping[{i}] must be a mapping.")
+        if not isinstance(item.get("expert_id"), str) or not item["expert_id"].strip():
+            raise ValueError(f"expert_feature_mapping[{i}] must contain expert_id.")
+        indices = item.get("feature_indices")
+        if not isinstance(indices, dict) or "start" not in indices or "end" not in indices:
+            raise ValueError(f"expert_feature_mapping[{i}] must contain feature_indices.start/end.")
+    return obj
+
+
 def normalize_judge_result(obj: Any) -> tuple[bool, list[dict[str, Any]], list[JudgeDecision]]:
     """Normalize judge output.
 
