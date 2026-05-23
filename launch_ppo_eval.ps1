@@ -20,12 +20,12 @@ $ModelKey       = "base1"           # only used when ControllerName = "ppo"
 $ModelTable = @{
     "base1" = @{
         # E:\repos\LLM_traffic_query\tests\sumo_traci\models_all\models_22+22+_2\sumo_ppo_seed172_exp1_600ep_1_1771926979__J1.pt
-        Checkpoint = "E:\repos\LLM_traffic_query\tests\sumo_traci\models_all\models_2L3S23O_1\sumo_ppo_seed172_litonly_ub_enc_frap_state_reward_unbiased_simple_v1_1775043165__J4.pt"
-        LogTag     = "b"
+        Checkpoint = "E:\repos\LLM_traffic_query\tests\sumo_traci\models_all\models_nonorm\3232sk_1\sumo_ppo_seed172_base_ploop+_ub_enc_bounded_v2+expert_reward_unbiased_simple_v1_1779376218__J0.pt"
+        LogTag     = "nn"
     }
     "exp1" = @{
         Checkpoint = "E:\repos\LLM_traffic_query\tests\sumo_traci\models_all\models_22+22+_2\sumo_ppo_seed172_exp1_600ep_1_1771926979__J1"
-        LogTag     = "zeroblk_1_4"
+        LogTag     = "n"
     }
 }
 
@@ -36,9 +36,9 @@ $ModelTable = @{
 $Scenario = @{
     # Sumocfg = "E:\Sumo\sumo_maps\4leg_3LR23LR2\4leg_3LR23LR2.sumocfg" "E:\Sumo\sumo_maps\4leg_22+22+\4leg_22+22+.sumocfg"
     # "E:\Sumo\sumo_maps\4leg_3232skewed\4leg_3232skewed.sumocfg" "E:\Sumo\sumo_maps\4leg_2L3S23O\4leg_2L3S23O.sumocfg"
-    Sumocfg = "E:\Sumo\sumo_maps\4leg_2L3S23O\4leg_2L3S23O.sumocfg"
-    # J0: 3232 skewed; J1: 3LR23LR2; J4: 2L3S23O
-    TlsId   = "J4"
+    Sumocfg = "E:\Sumo\sumo_maps\4leg_3232skewed\4leg_3232skewed.sumocfg"
+    # J0: 3232 skewed; J1: 3LR23LR2, 22L22L; J4: 2L3S23O
+    TlsId   = "J0"
 }
 
 # --------------------------------------------------
@@ -49,7 +49,7 @@ $EvalArgs = @(
     # "E:\repos\LLM_traffic_query\tests\sumo_traci\eval_results\3LR23LR2\ub", 
     # "E:\repos\LLM_traffic_query\tests\sumo_traci\eval_results\3232skewed\ub",
     # "E:\repos\LLM_traffic_query\tests\sumo_traci\eval_results\2L3S23O\ub",
-    "--log-dir", "E:\repos\LLM_traffic_query\tests\sumo_traci\eval_results\2L3S23O\ub",
+    "--log-dir", "E:\repos\LLM_traffic_query\tests\sumo_traci\eval_results\nonorm\3232sk\",
     "--episodes", "200",
     "--episode-len", "3600",
     "--sumo-seed", "10086",

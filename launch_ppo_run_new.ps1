@@ -10,14 +10,14 @@ Set-Location $WorkDir
 # -----------------------------
 # Select reward here
 # -----------------------------
-$RewardName = "pressure"   # "universal_v2" | "queue" | "pressure" | "unbiased_simple_v1"
+$RewardName = "unbiased_simple_v1"   # "universal_v2" | "queue" | "pressure" | "unbiased_simple_v1"
 
 # -----------------------------
 # Select encoder composition here
 # -----------------------------
 # "adlight_state" "frap_state"
 $CoreEncoderName  = "bounded_v2"   # "bounded_v2" | "pressure_state" | "ats"
-$AddonEncoderName = "pressure_state"         # "none" | "expert" | "pressure_state" | "ats"
+$AddonEncoderName = "expert"         # "none" | "expert" | "pressure_state" | "ats"
 
 # -----------------------------
 # Common PPO / scenario args
@@ -26,7 +26,7 @@ $RunArgs = @(
     # "E:\Sumo\sumo_maps\4leg_22+22+\4leg_22+22+.sumocfg", "E:\Sumo\sumo_maps\4leg_3LR23LR2\4leg_3LR23LR2.sumocfg",
     # "E:\Sumo\sumo_maps\4leg_3232skewed\4leg_3232skewed.sumocfg",
     # "E:\Sumo\sumo_maps\4leg_2L3S23O\4leg_2L3S23O.sumocfg",
-  "-c", "E:\Sumo\sumo_maps\4leg_2L3S23O\4leg_2L3S23O.sumocfg",
+  "-c", "E:\Sumo\sumo_maps\4leg_3LR23LR2\4leg_3LR23LR2.sumocfg",
   "--max-time", "6000000",
   "--episode-len", "7200",
   "--warmup", "100",
@@ -45,10 +45,10 @@ $RunArgs = @(
   "--traffic-scale-std", "0.05",
   # "E:\repos\LLM_traffic_query\tests\sumo_traci\tensorboard_logs_all\tsb_3232skewed_2",
   # "E:\repos\LLM_traffic_query\tests\sumo_traci\tensorboard_logs_all\tsb_3LR23LR2_5",
-  "--tb-logdir", "E:\repos\LLM_traffic_query\tests\sumo_traci\tensorboard_logs_all\tsb_2L3S23O_1",
+  "--tb-logdir", "E:\repos\LLM_traffic_query\tests\sumo_traci\tensorboard_logs_all\tsb_nonorm\3LR23LR2_1",
   # "E:\repos\LLM_traffic_query\tests\sumo_traci\models_all\models_3232skewed_2",
   # "E:\repos\LLM_traffic_query\tests\sumo_traci\models_all\models_3LR23LR2\5",
-  "--save-dir", "E:\repos\LLM_traffic_query\tests\sumo_traci\models_all\models_2L3S23O_1",
+  "--save-dir", "E:\repos\LLM_traffic_query\tests\sumo_traci\models_all\models_nonorm\3LR23LR2_1",
   "--rollout-steps", "2048",
   "--ppo-epochs", "5",
   "--minibatch", "256",

@@ -21,6 +21,8 @@ out.txt
 memo.txt
 **/energy_prediction/results/
 **/auto_prompting/runs/
+**/LLMFE/logs
+**/LLMFE/results_energy_llmfe
 
 *.ftr
 

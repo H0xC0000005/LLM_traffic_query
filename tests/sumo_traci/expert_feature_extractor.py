@@ -1,904 +1,1006 @@
+from typing import Dict, Any, List, Tuple, Optional
+import math
+import libsumo as traci
+
+
+def _parse_intersection_encoding_to_bearings(
+    intersection_encoding: str,
+) -> Dict[str, float]:
+    """
+    Parse the compact intersection encoding into a mapping from leg name
+    (e.g. 'N','E','S','W') to nominal bearing in degrees.
+    """
+    s = intersection_encoding.strip()
+    if s.startswith("{") and s.endswith("}"):
+        s = s[1:-1]
+    parts = [p.strip() for p in s.split(";") if p.strip()]
+    leg_bearings: Dict[str, float] = {}
+    for part in parts:
+        if ":" in part:
+            left, _right = part.split(":", 1)
+        else:
+            left = part
+        left = left.strip()
+        if not left:
+            continue
+
+        # Leg name: up to first '@' or '^' or ':' (defensive)
+        end_idx = len(left)
+        for ch in ("@", "^", ":"):
+            idx = left.find(ch)
+            if idx != -1 and idx < end_idx:
+                end_idx = idx
+        leg_name = left[:end_idx].strip()
+
+        # Bearing, if present after '@'
+        bearing: Optional[float] = None
+        at_idx = left.find("@")
+        if at_idx != -1:
+            end_b_idx = len(left)
+            for ch in ("^", ":"):
+                idx2 = left.find(ch, at_idx + 1)
+                if idx2 != -1 and idx2 < end_b_idx:
+                    end_b_idx = idx2
+            bearing_str = left[at_idx + 1 : end_b_idx].strip()
+            try:
+                bearing = float(bearing_str)
+            except Exception:
+                bearing = None
+
+        if leg_name and bearing is not None:
+            leg_bearings[leg_name] = bearing
+    return leg_bearings
+
+
+def _angular_diff(a: float, b: float) -> float:
+    """Minimal absolute difference between two angles in degrees."""
+    d = abs(a - b) % 360.0
+    if d > 180.0:
+        d = 360.0 - d
+    return d
+
+
+def _get_or_build_topology(
+    tls_id: str,
+    intersection_encoding: str,
+    cache: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Build or retrieve from cache the intersection topology for this tls_id:
+    - lane_ids_per_approach: {N,E,S,W -> [inbound lane ids]}
+    - lane_group_ids: list of approach-level lane group ids [N,E,S,W]
+    - lane_group_definitions: mapping group id -> inbound lane ids
+    - movement_definitions: {approach_id -> {lanes, signal_indices}}
+    - lane_id_to_approach: {lane_id -> 'N'|'E'|'S'|'W'|'U'}
+    - controlled_lanes_ordered: list of lanes in state-string order
+    """
+    topo_all = cache.setdefault("tsc_topology_by_tls", {})
+    if tls_id in topo_all:
+        return topo_all[tls_id]
+
+    leg_bearings = _parse_intersection_encoding_to_bearings(intersection_encoding)
+
+    # Controlled lanes for this tls, ordered consistently with the RYG state string.
+    controlled_lanes_ordered: List[str] = list(
+        traci.trafficlight.getControlledLanes(tls_id)
+    )
+    unique_lanes = sorted(set(controlled_lanes_ordered))
+
+    # Map each inbound lane to an approach based on its edge heading.
+    lane_id_to_approach: Dict[str, str] = {}
+    inbound_lanes_per_approach: Dict[str, List[str]] = {
+        "N": [],
+        "E": [],
+        "S": [],
+        "W": [],
+    }
+
+    for lane_id in unique_lanes:
+        approach = "U"
+        try:
+            edge_id = traci.lane.getEdgeID(lane_id)
+            # Use edge heading in degrees; 0° = east, 90° = north (per SUMO docs)
+            edge_angle = float(traci.edge.getAngle(edge_id))
+            if math.isfinite(edge_angle) and leg_bearings:
+                # Convert SUMO heading to compass with 0°=north, clockwise positive.
+                compass_bearing = (90.0 - edge_angle) % 360.0
+                # Assign to closest leg bearing
+                best_leg = None
+                best_diff = 1e9
+                for leg, leg_bearing in leg_bearings.items():
+                    d = _angular_diff(compass_bearing, leg_bearing)
+                    if d < best_diff:
+                        best_diff = d
+                        best_leg = leg
+                # Only accept if we found a named leg
+                if best_leg in ("N", "E", "S", "W"):
+                    approach = best_leg
+        except Exception:
+            # Fallback: try first character of lane id
+            if lane_id:
+                first_char = lane_id[0].upper()
+                if first_char in ("N", "E", "S", "W"):
+                    approach = first_char
+                else:
+                    approach = "U"
+
+        lane_id_to_approach[lane_id] = approach
+        if approach in inbound_lanes_per_approach:
+            inbound_lanes_per_approach[approach].append(lane_id)
+
+    # Define lane groups as approach-level groups (aggregating L/T/TR for this assembly).
+    lane_group_ids: List[str] = ["N", "E", "S", "W"]
+    lane_group_definitions: Dict[str, List[str]] = {
+        lg: inbound_lanes_per_approach.get(lg, []) for lg in lane_group_ids
+    }
+
+    # Build movement_definitions collapsed to approach-level movements.
+    links = traci.trafficlight.getControlledLinks(tls_id)
+    movement_definitions: Dict[str, Dict[str, Any]] = {}
+    for approach in ("N", "E", "S", "W"):
+        lanes = inbound_lanes_per_approach.get(approach, [])
+        signal_indices: List[int] = []
+        if lanes:
+            lane_set = set(lanes)
+            for idx, link_tuples in enumerate(links):
+                if not link_tuples:
+                    continue
+                for in_lane, _out_lane, _via in link_tuples:
+                    if in_lane in lane_set:
+                        signal_indices.append(idx)
+                        break
+        movement_definitions[approach] = {
+            "lanes": lanes,
+            "signal_indices": signal_indices,
+            "stopline_positions": {},  # not used explicitly in this assembly
+        }
+
+    topo: Dict[str, Any] = {
+        "lane_ids_per_approach": inbound_lanes_per_approach,
+        "lane_group_ids": lane_group_ids,
+        "lane_group_definitions": lane_group_definitions,
+        "movement_definitions": movement_definitions,
+        "lane_id_to_approach": lane_id_to_approach,
+        "controlled_lanes_ordered": controlled_lanes_ordered,
+    }
+    topo_all[tls_id] = topo
+    return topo
+
+
+def _initialize_green_utilization_state(
+    tls_id: str,
+    cache: Dict[str, Any],
+    saturation_flow_per_lane: float,
+    topology: Dict[str, Any],
+) -> None:
+    """
+    Initialize per-tls green utilization state: service phases, approach mapping,
+    and accumulators. Derived from expert_01, with topology-based lane->approach
+    mapping and active-program resolution.
+    """
+    gu_state_all = cache.setdefault("green_utilization_state", {})
+    if tls_id in gu_state_all:
+        return
+
+    controlled_lanes: List[str] = list(
+        topology.get("controlled_lanes_ordered")
+        or traci.trafficlight.getControlledLanes(tls_id)
+    )
+
+    lane_index_to_id: Dict[int, str] = {
+        idx: lid for idx, lid in enumerate(controlled_lanes)
+    }
+    lane_id_to_approach: Dict[str, str] = topology.get("lane_id_to_approach", {})
+    lane_index_to_approach: Dict[int, str] = {
+        idx: lane_id_to_approach.get(lid, "U") for idx, lid in lane_index_to_id.items()
+    }
+
+    # Determine active signal program definition.
+    program_defs = traci.trafficlight.getCompleteRedYellowGreenDefinition(tls_id)
+    active_program_id = traci.trafficlight.getProgram(tls_id)
+    program_def = None
+    for logic in program_defs:
+        if getattr(logic, "programID", None) == active_program_id:
+            program_def = logic
+            break
+    if program_def is None and program_defs:
+        program_def = program_defs[0]
+    raw_phases = getattr(program_def, "phases", []) if program_def is not None else []
+
+    service_phases: Dict[int, Dict[str, Any]] = {}
+    for raw_idx, phase in enumerate(raw_phases):
+        state = phase.state
+        has_green = any(c in ("g", "G") for c in state)
+        if not has_green:
+            continue
+
+        service_phase_id = raw_idx
+        approach_lanes: Dict[str, List[str]] = {"N": [], "E": [], "S": [], "W": []}
+        for sig_idx, sig_char in enumerate(state):
+            if sig_char not in ("g", "G"):
+                continue
+            lane_id = lane_index_to_id.get(sig_idx)
+            if lane_id is None:
+                continue
+            appr = lane_index_to_approach.get(sig_idx, "U")
+            if appr in approach_lanes:
+                approach_lanes[appr].append(lane_id)
+
+        served_approaches = {
+            appr: lanes for appr, lanes in approach_lanes.items() if lanes
+        }
+        if not served_approaches:
+            continue
+
+        service_phases[service_phase_id] = {
+            "raw_phase_index": raw_idx,
+            "served_approaches": served_approaches,
+        }
+
+    # Initialize accumulators for each service_phase_id and approach.
+    accumulators: Dict[Tuple[int, str], Dict[str, float]] = {}
+    for sp_id, sp_info in service_phases.items():
+        for appr, lanes in sp_info["served_approaches"].items():
+            key = (sp_id, appr)
+            n_lanes = float(len(lanes))
+            accumulators[key] = {
+                "total_green_time": 0.0,
+                "effective_service_time": 0.0,
+                "wasted_green_time": 0.0,
+                "total_discharged_vehicles": 0.0,
+                "num_lanes": n_lanes,
+            }
+
+    # Previous lane vehicle counts for approximate departure estimation.
+    prev_lane_counts: Dict[str, float] = {}
+    for lane_id in controlled_lanes:
+        try:
+            prev_lane_counts[lane_id] = float(
+                traci.lane.getLastStepVehicleNumber(lane_id)
+            )
+        except Exception:
+            prev_lane_counts[lane_id] = 0.0
+
+    gu_state_all[tls_id] = {
+        "lane_index_to_id": lane_index_to_id,
+        "lane_index_to_approach": lane_index_to_approach,
+        "service_phases": service_phases,
+        "accumulators": accumulators,
+        "prev_lane_counts": prev_lane_counts,
+        "saturation_flow_per_lane": float(saturation_flow_per_lane),
+    }
+
+
+def _update_green_utilization_and_get_matrices(
+    tls_id: str,
+    cache: Dict[str, Any],
+    sim_step_duration: float,
+    saturation_flow_per_lane: float,
+    topology: Dict[str, Any],
+) -> Tuple[List[List[float]], List[List[float]], List[List[float]]]:
+    """
+    Update green utilization accumulators for current step and emit matrices:
+    (green_utilization_ratio, wasted_green_seconds, discharge_flow_ratio).
+    Derived from expert_01's per_phase_green_utilization_features.
+    """
+    _initialize_green_utilization_state(
+        tls_id, cache, saturation_flow_per_lane, topology
+    )
+    gu_state = cache["green_utilization_state"][tls_id]
+
+    lane_index_to_id: Dict[int, str] = gu_state["lane_index_to_id"]
+    service_phases: Dict[int, Dict[str, Any]] = gu_state["service_phases"]
+    accumulators: Dict[Tuple[int, str], Dict[str, float]] = gu_state["accumulators"]
+    prev_lane_counts: Dict[str, float] = gu_state["prev_lane_counts"]
+    sat_flow_lane: float = float(gu_state["saturation_flow_per_lane"])
+
+    current_raw_phase: int = int(traci.trafficlight.getPhase(tls_id))
+    current_state: str = traci.trafficlight.getRedYellowGreenState(tls_id)
+
+    if current_raw_phase in service_phases:
+        sp_info = service_phases[current_raw_phase]
+        served_approaches: Dict[str, List[str]] = sp_info["served_approaches"]
+
+        lane_departures: Dict[str, float] = {}
+        lane_vehicle_numbers: Dict[str, float] = {}
+        for _idx, lane_id in lane_index_to_id.items():
+            try:
+                curr_num = float(traci.lane.getLastStepVehicleNumber(lane_id))
+            except Exception:
+                curr_num = 0.0
+            prev_num = float(prev_lane_counts.get(lane_id, curr_num))
+            departed = max(prev_num - curr_num, 0.0)
+            lane_departures[lane_id] = departed
+            lane_vehicle_numbers[lane_id] = curr_num
+            prev_lane_counts[lane_id] = curr_num
+
+        dt = float(sim_step_duration)
+        for appr, appr_lanes in served_approaches.items():
+            key = (current_raw_phase, appr)
+            if key not in accumulators:
+                continue
+
+            green_lanes_for_approach: List[str] = []
+            for sig_idx, sig_char in enumerate(current_state):
+                if sig_char not in ("g", "G"):
+                    continue
+                lane_id = lane_index_to_id.get(sig_idx)
+                if lane_id is None:
+                    continue
+                if lane_id in appr_lanes:
+                    green_lanes_for_approach.append(lane_id)
+
+            if not green_lanes_for_approach:
+                continue
+
+            total_departed = 0.0
+            total_lane_vehicles = 0.0
+            for lane_id in green_lanes_for_approach:
+                total_departed += lane_departures.get(lane_id, 0.0)
+                total_lane_vehicles += lane_vehicle_numbers.get(lane_id, 0.0)
+
+            acc = accumulators[key]
+            acc["total_green_time"] += dt
+            if (total_lane_vehicles > 0.0) or (total_departed > 0.0):
+                acc["effective_service_time"] += dt
+            else:
+                acc["wasted_green_time"] += dt
+            acc["total_discharged_vehicles"] += total_departed
+
+    approaches_order = ["N", "E", "S", "W"]
+    phase_ids_sorted = sorted(service_phases.keys())
+
+    green_utilization_matrix: List[List[float]] = []
+    wasted_green_matrix: List[List[float]] = []
+    discharge_flow_ratio_matrix: List[List[float]] = []
+
+    for sp_id in phase_ids_sorted:
+        row_util: List[float] = []
+        row_waste: List[float] = []
+        row_flow_ratio: List[float] = []
+        for appr in approaches_order:
+            key = (sp_id, appr)
+            if key not in accumulators:
+                row_util.append(0.0)
+                row_waste.append(0.0)
+                row_flow_ratio.append(0.0)
+                continue
+
+            acc = accumulators[key]
+            total_green = acc["total_green_time"]
+            eff_green = acc["effective_service_time"]
+            wasted_green = acc["wasted_green_time"]
+            total_discharged = acc["total_discharged_vehicles"]
+            n_lanes = max(acc.get("num_lanes", 0.0), 0.0)
+
+            if total_green > 0.0:
+                util_ratio = eff_green / total_green
+            else:
+                util_ratio = 0.0
+
+            if (total_green > 0.0) and (sat_flow_lane > 0.0) and (n_lanes > 0.0):
+                observed_flow = total_discharged / total_green
+                capacity = sat_flow_lane * n_lanes
+                flow_ratio = observed_flow / capacity
+            else:
+                flow_ratio = 0.0
+
+            row_util.append(float(util_ratio))
+            row_waste.append(float(wasted_green))
+            row_flow_ratio.append(float(flow_ratio))
+
+        green_utilization_matrix.append(row_util)
+        wasted_green_matrix.append(row_waste)
+        discharge_flow_ratio_matrix.append(row_flow_ratio)
+
+    return green_utilization_matrix, wasted_green_matrix, discharge_flow_ratio_matrix
+
+
+# === Expert 02: approach headway profile (unchanged except for being reused) ===
+
+def compute_approach_headway_profile(
+    traci_module,
+    lane_ids_per_approach: Dict[str, List[str]],
+    prediction_horizon_s: float = 10.0,
+    queue_speed_threshold_mps: float = 0.5,
+    platoon_headway_threshold_s: float = 2.0,
+    queue_region_m: float = 30.0,
+) -> Dict[str, Any]:
+    """
+    Compute short-horizon arrival headway features per approach from SUMO state.
+    (Expert_02 implementation, slightly wrapped to accept global traci as argument.)
+    """
+    approach_order = ["N", "E", "S", "W"]
+
+    next_arrival_tta_s: List[float] = []
+    mean_imminent_headway_s: List[float] = []
+    std_imminent_headway_s: List[float] = []
+    platoon_short_headway_count: List[int] = []
+    predicted_arrival_ttas_s: List[List[float]] = []
+
+    max_headways_for_stats = 3
+
+    for approach_id in approach_order:
+        lane_ids = lane_ids_per_approach.get(approach_id, [])
+        arrival_ttas: List[float] = []
+
+        for lane_id in lane_ids:
+            try:
+                veh_ids = traci_module.lane.getLastStepVehicleIDs(lane_id)
+            except Exception:
+                continue
+
+            try:
+                lane_length = float(traci_module.lane.getLength(lane_id))
+            except Exception:
+                continue
+
+            for veh_id in veh_ids:
+                try:
+                    pos = float(traci_module.vehicle.getLanePosition(veh_id))
+                    speed = float(traci_module.vehicle.getSpeed(veh_id))
+                except Exception:
+                    continue
+
+                distance_to_stopline = lane_length - pos
+                if distance_to_stopline <= 0.0:
+                    continue
+
+                if (
+                    speed <= queue_speed_threshold_mps
+                    and distance_to_stopline <= queue_region_m
+                ):
+                    continue
+
+                if speed <= 1e-3:
+                    continue
+
+                tta = distance_to_stopline / speed
+                if 0.0 < tta <= prediction_horizon_s:
+                    arrival_ttas.append(tta)
+
+        arrival_ttas.sort()
+        predicted_arrival_ttas_s.append(arrival_ttas)
+
+        if arrival_ttas:
+            next_tta = arrival_ttas[0]
+        else:
+            next_tta = prediction_horizon_s
+        next_arrival_tta_s.append(next_tta)
+
+        if len(arrival_ttas) >= 2:
+            headways: List[float] = []
+            for i in range(len(arrival_ttas) - 1):
+                hw = arrival_ttas[i + 1] - arrival_ttas[i]
+                if hw > 0.0:
+                    headways.append(hw)
+
+            short_hw_count = sum(
+                1 for hw in headways if hw <= platoon_headway_threshold_s
+            )
+            platoon_short_headway_count.append(short_hw_count)
+
+            if headways:
+                selected_headways = headways[:max_headways_for_stats]
+                n = len(selected_headways)
+                if n >= 1:
+                    mean_hw = sum(selected_headways) / float(n)
+                else:
+                    mean_hw = prediction_horizon_s
+
+                if n >= 2:
+                    var_hw = (
+                        sum((hw - mean_hw) ** 2 for hw in selected_headways)
+                        / float(n)
+                    )
+                    std_hw = var_hw ** 0.5
+                else:
+                    std_hw = 0.0
+            else:
+                mean_hw = prediction_horizon_s
+                std_hw = 0.0
+        else:
+            platoon_short_headway_count.append(0)
+            mean_hw = prediction_horizon_s
+            std_hw = 0.0
+
+        mean_imminent_headway_s.append(mean_hw)
+        std_imminent_headway_s.append(std_hw)
+
+    return {
+        "approach_order": approach_order,
+        "approach_next_arrival_tta_s": next_arrival_tta_s,
+        "approach_mean_imminent_headway_s": mean_imminent_headway_s,
+        "approach_std_imminent_headway_s": std_imminent_headway_s,
+        "approach_platoon_short_headway_count": platoon_short_headway_count,
+        "approach_predicted_arrival_ttas_s": predicted_arrival_ttas_s,
+    }
+
+
+# === Expert 03: green-onset discharge dynamics (verbatim, with traci module) ===
+
+def compute_green_onset_discharge_features(
+    traci_module,
+    tls_id: str,
+    current_time: float,
+    movement_definitions: Dict[str, Dict[str, Any]],
+    cache: Dict[str, Any],
+    config: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Expert_03 implementation, slightly adapted to receive the traci module as an argument.
+    """
+    if config is None:
+        config = {}
+    queue_detection_distance = float(config.get("queue_detection_distance", 50.0))
+    queue_speed_threshold = float(config.get("queue_speed_threshold", 0.1))
+    headway_K = int(config.get("headway_K", 5))
+    early_window = float(config.get("early_window", 10.0))
+
+    if "prev_signal_state" not in cache:
+        cache["prev_signal_state"] = traci_module.trafficlight.getRedYellowGreenState(
+            tls_id
+        )
+
+    if "green_episodes" not in cache:
+        cache["green_episodes"] = {}
+
+    prev_state = cache["prev_signal_state"]
+    curr_state = traci_module.trafficlight.getRedYellowGreenState(tls_id)
+    cache["prev_signal_state"] = curr_state
+
+    green_episodes = cache["green_episodes"]
+
+    def movement_has_green(state_str: str, signal_indices: List[int]) -> bool:
+        for idx in signal_indices:
+            if 0 <= idx < len(state_str):
+                c = state_str[idx]
+                if c == "g" or c == "G":
+                    return True
+        return False
+
+    # Detect green onsets and update episode structures.
+    for movement_id, mdef in movement_definitions.items():
+        signal_indices = mdef.get("signal_indices", [])
+        if movement_id not in green_episodes:
+            green_episodes[movement_id] = {
+                "active": False,
+                "onset_time": 0.0,
+                "initial_queue_members": set(),
+                "initial_queue_length": 0,
+                "crossing_times": [],
+            }
+
+        episode = green_episodes[movement_id]
+        was_green = movement_has_green(prev_state, signal_indices)
+        is_green = movement_has_green(curr_state, signal_indices)
+
+        if (not was_green) and is_green:
+            episode["active"] = True
+            episode["onset_time"] = current_time
+            episode["initial_queue_members"] = set()
+            episode["initial_queue_length"] = 0
+            episode["crossing_times"] = []
+
+            lanes = mdef.get("lanes", [])
+            stopline_positions = mdef.get("stopline_positions", {})
+
+            for lane_id in lanes:
+                lane_len = traci_module.lane.getLength(lane_id)
+                stopline_pos = stopline_positions.get(lane_id, lane_len)
+
+                veh_ids = traci_module.lane.getLastStepVehicleIDs(lane_id)
+                for veh_id in veh_ids:
+                    lane_pos = traci_module.vehicle.getLanePosition(veh_id)
+                    speed = traci_module.vehicle.getSpeed(veh_id)
+                    dist_to_stop = max(0.0, stopline_pos - lane_pos)
+                    if (
+                        dist_to_stop <= queue_detection_distance
+                        and speed <= queue_speed_threshold
+                    ):
+                            episode["initial_queue_members"].add(veh_id)
+
+            episode["initial_queue_length"] = len(episode["initial_queue_members"])
+
+        if was_green and (not is_green):
+            episode["active"] = False
+
+    # Track departure of initial-queue vehicles as they leave inbound lanes.
+    inbound_presence_by_movement: Dict[str, set] = {}
+    for movement_id, mdef in movement_definitions.items():
+        lanes = mdef.get("lanes", [])
+        present = set()
+        for lane_id in lanes:
+            for veh_id in traci_module.lane.getLastStepVehicleIDs(lane_id):
+                present.add(veh_id)
+        inbound_presence_by_movement[movement_id] = present
+
+    for movement_id, episode in green_episodes.items():
+        if not episode["active"]:
+            continue
+
+        current_inbound_veh_ids = inbound_presence_by_movement.get(movement_id, set())
+        initial_members = episode.get("initial_queue_members", set())
+        recorded_veh_ids = {vid for (vid, _) in episode.get("crossing_times", [])}
+
+        for veh_id in initial_members:
+            if veh_id not in current_inbound_veh_ids and veh_id not in recorded_veh_ids:
+                episode["crossing_times"].append((veh_id, current_time))
+
+    # Compute features.
+    features_by_movement: Dict[str, Dict[str, Any]] = {}
+    for movement_id, episode in green_episodes.items():
+        onset_time = float(episode.get("onset_time", 0.0))
+        initial_queue_length = int(episode.get("initial_queue_length", 0))
+        crossing_times_raw = episode.get("crossing_times", [])
+
+        sorted_crossings = sorted(crossing_times_raw, key=lambda x: x[1])
+        times_only = [t for (_, t) in sorted_crossings]
+
+        headways: List[float] = [0.0 for _ in range(headway_K)]
+        start_delay = 0.0
+
+        if times_only and onset_time is not None:
+            start_delay = max(0.0, times_only[0] - onset_time)
+            headways[0] = start_delay
+
+            for i in range(1, min(headway_K, len(times_only))):
+                h = max(0.0, times_only[i] - times_only[i - 1])
+                headways[i] = h
+        else:
+            start_delay = 0.0
+
+        discharged_in_window = 0
+        effective_window = 0.0
+        if onset_time is not None and current_time > onset_time:
+            effective_window = min(early_window, current_time - onset_time)
+            window_end_time = onset_time + early_window
+            for t in times_only:
+                if t <= window_end_time:
+                    discharged_in_window += 1
+
+        if effective_window > 0.0:
+            discharge_rate_first_10s = discharged_in_window / effective_window
+        else:
+            discharge_rate_first_10s = 0.0
+
+        if initial_queue_length > 0 and len(times_only) >= initial_queue_length:
+            last_crossing_time = times_only[initial_queue_length - 1]
+            time_to_clear_initial_queue = max(0.0, last_crossing_time - onset_time)
+            queue_cleared_flag = 1
+        else:
+            if onset_time is not None:
+                time_to_clear_initial_queue = max(0.0, current_time - onset_time)
+            else:
+                time_to_clear_initial_queue = 0.0
+            queue_cleared_flag = 0
+
+        if initial_queue_length > 0 and onset_time is not None:
+            window_end_time_10 = onset_time + 10.0
+            discharged_in_10s = 0
+            for t in times_only:
+                if t <= window_end_time_10:
+                    discharged_in_10s += 1
+            fraction_discharged_10s = min(
+                1.0, discharged_in_10s / float(initial_queue_length)
+            )
+        else:
+            fraction_discharged_10s = 0.0
+
+        features_by_movement[movement_id] = {
+            "initial_queue_length_at_green": initial_queue_length,
+            "headways_first_5_vehicles_from_queue": headways,
+            "start_vehicle_delay_first_from_green": start_delay,
+            "discharge_rate_first_10s": discharge_rate_first_10s,
+            "time_to_clear_initial_queue": time_to_clear_initial_queue,
+            "fraction_of_initial_queue_discharged_in_10s": fraction_discharged_10s,
+            "queue_cleared_flag": int(queue_cleared_flag),
+        }
+
+    return features_by_movement
+
+
+# === Expert 04: lane-group saturation ratio ===
+
+def compute_lane_group_saturation_short_horizon(
+    lane_group_ids: List[str],
+    lane_group_definitions: Dict[str, List[str]],
+    detection_zone_length_m: float = 150.0,
+    saturation_flow_rate_per_lane_veh_per_s: float = 0.5,
+    decision_horizon_seconds: float = 20.0,
+) -> Tuple[List[float], List[int], List[float]]:
+    """
+    Expert_04 implementation, slightly simplified to assume global libsumo as traci.
+    """
+    sat_ratios: List[float] = []
+    demands_veh: List[int] = []
+    capacities_veh: List[float] = []
+
+    capacity_per_lane_veh = (
+        saturation_flow_rate_per_lane_veh_per_s * decision_horizon_seconds
+    )
+
+    for lg_id in lane_group_ids:
+        lane_ids = lane_group_definitions.get(lg_id, [])
+        demand_count = 0
+        for lane_id in lane_ids:
+            try:
+                veh_ids = traci.lane.getLastStepVehicleIDs(lane_id)
+                lane_length = traci.lane.getLength(lane_id)
+            except Exception:
+                continue
+
+            for veh_id in veh_ids:
+                try:
+                    pos_on_lane = traci.vehicle.getLanePosition(veh_id)
+                except Exception:
+                    continue
+
+                distance_to_stop = lane_length - pos_on_lane
+                if 0.0 <= distance_to_stop <= detection_zone_length_m:
+                    demand_count += 1
+
+        num_lanes_in_group = len(lane_ids)
+        capacity_veh = capacity_per_lane_veh * float(num_lanes_in_group)
+
+        if capacity_veh > 0.0:
+            sat_ratio = float(demand_count) / capacity_veh
+        else:
+            sat_ratio = 0.0
+
+        sat_ratios.append(sat_ratio)
+        demands_veh.append(demand_count)
+        capacities_veh.append(capacity_veh)
+
+    return sat_ratios, demands_veh, capacities_veh
+
+
 def tsc_isolated_intersection_feature_vector(
     tls_id: str,
     *,
-    cache: dict | None = None,
-    intersection_encoding: str = "{N@335:->3; E@90^(+1,+1):T|TR; S@155^:LT|T|TRx; W@270^(+1,+1):L60|T|T}",
-    jam_vehicle_spacing_m: float = 7.5,
-    wait_cap_s: float = 90.0,
-    ema_alpha: float = 0.65,
-    detection_distance_m: float = 120.0,
-    prediction_horizon_s: float = 12.0,
-    base_critical_gap_s: float = 5.1,
-    follow_up_gap_s: float = 2.4,
-    min_running_speed_mps: float = 4.0,
-    startup_queue_distance_m: float = 25.0,
-    commit_distance_m: float = 35.0,
-    nominal_transition_s: float = 7.0,
-    nominal_startup_loss_s: float = 2.5,
-    sat_headway_s: float = 2.0,
-    depart_zone_m: float = 7.0,
-    startup_equiv_veh_per_lane: int = 4,
-    startup_cap_s: float = 4.0,
-    clearance_cap_s: float = 4.0,
-    **kwargs,
-) -> list[float]:
-    """Combine the four expert TSC feature extractors into one ML-ready numeric vector.
-
-    Args:
-        tls_id: SUMO/libsumo traffic-light id for the isolated junction.
-        cache: Caller-owned mutable cache that persists across simulation steps.
-        intersection_encoding: Compact geometry/lane encoding for the analyzed junction.
-        Remaining parameters are expert defaults kept configurable.
-    Returns:
-        A 23-D list[float]:
-        9 critical-lane stress + 3 permissive-left gap + 3 transition loss + 8 cycle green-loss features.
+    cache: Optional[Dict[str, Any]] = None,
+    intersection_encoding: str = "{N@0^(-5,+5):L|T|TR; E@90^(-1,+1):L|T|TR; S@190^(-5,+5):L|T|TR;W@270^(-1,+1):L|T|TR}",
+    sim_step_duration: float = 1.0,
+    saturation_flow_per_lane: float = 0.5,
+    arrival_prediction_horizon_s: float = 10.0,
+    arrival_queue_speed_threshold_mps: float = 0.5,
+    arrival_platoon_headway_threshold_s: float = 2.0,
+    arrival_queue_region_m: float = 30.0,
+    discharge_config: Optional[Dict[str, Any]] = None,
+    saturation_detection_zone_length_m: float = 150.0,
+    saturation_flow_rate_per_lane_veh_per_s: float = 0.5,
+    saturation_decision_horizon_seconds: float = 20.0,
+    max_tracked_service_phases: int = 8,
+    headway_K: int = 5,
+    **kwargs: Any,
+) -> List[float]:
     """
-    import math
-    import re
+    Compute a combined feature vector for a single isolated SUMO intersection,
+    aggregating expert-designed green utilization, arrival headway, discharge
+    dynamics, and lane-group saturation features using only current simulation
+    state and a small external cache.
 
-    try:
-        import libsumo as traci
-    except ImportError:
-        import traci  # type: ignore
+    Parameters
+    ----------
+    tls_id : str
+        Traffic light system identifier for the isolated intersection.
+    cache : dict, optional
+        Mutable dictionary preserved across calls. Used to store:
+        - 'tsc_topology_by_tls' (lane and approach topology),
+        - 'green_utilization_state' (expert_01 accumulators),
+        - 'prev_signal_state' and 'green_episodes' (expert_03).
+        If None, a new local cache is created for this call only.
+    intersection_encoding : str
+        Compact encoding of the intersection geometry and lane permissions.
+        Defaults to the scenario instance provided in the problem statement.
+    sim_step_duration : float
+        SUMO step length in seconds, used for time accumulation in green
+        utilization metrics.
+    saturation_flow_per_lane : float
+        Nominal saturation discharge flow per inbound lane (veh/s) for
+        expert_01's discharge flow ratio.
+    arrival_prediction_horizon_s : float
+        Short-term horizon for predicting arrivals in expert_02 (seconds).
+    arrival_queue_speed_threshold_mps : float
+        Speed threshold (m/s) below which vehicles near the stop line are
+        treated as queued and excluded from arrival headway calculations.
+    arrival_platoon_headway_threshold_s : float
+        Headway threshold (seconds) defining "short" headways for platoon
+        intensity in expert_02.
+    arrival_queue_region_m : float
+        Spatial region upstream of the stop line (meters) where slow vehicles
+        are treated as standing queue in expert_02.
+    discharge_config : dict, optional
+        Optional configuration for expert_03. If provided, overrides queue
+        detection distance, queue speed threshold, headway_K, and
+        early_window. The headway_K argument to this function is always
+        enforced into this config to keep the feature dimension fixed.
+    saturation_detection_zone_length_m : float
+        Upstream distance (meters) used to count demand vehicles for
+        expert_04.
+    saturation_flow_rate_per_lane_veh_per_s : float
+        Assumed saturation flow per lane (veh/s) for expert_04.
+    saturation_decision_horizon_seconds : float
+        Time horizon (seconds) over which hypothetical lane-group capacity
+        is evaluated for expert_04.
+    max_tracked_service_phases : int
+        Maximum number of service phases to encode per expert_01 matrices.
+        Excess phases are discarded; missing phases are padded with zeros.
+    headway_K : int
+        Number of initial discharge headways to record per approach for
+        expert_03. Feature layout assumes this value (default 5).
+    **kwargs : Any
+        Ignored compatibility arguments; reserved for future use.
 
+    Returns
+    -------
+    List[float]
+        Flat feature vector of length 168 when using default
+        max_tracked_service_phases=8 and headway_K=5, with the following
+        layout:
+        - indices [0,96): expert_01 phase-approach utilization/waste/flow
+        - indices [96,112): expert_02 approach headway profile summaries
+        - indices [112,156): expert_03 approach-level discharge blocks
+        - indices [156,168): expert_04 approach-level saturation ratios,
+          demands, and capacities.
+
+    Cache usage
+    -----------
+    The function never resets the caller-provided cache. It lazily
+    initializes and updates topology, green utilization accumulators, and
+    green-onset episodes inside the cache under names that are specific to
+    this feature family and tls_id.
+    """
     if cache is None:
         cache = {}
 
-    def _clip01(x: float) -> float:
-        return max(0.0, min(1.0, float(x)))
+    # Build or retrieve intersection topology (lane->approach, groups, movements).
+    topology = _get_or_build_topology(tls_id, intersection_encoding, cache)
 
-    def _norm_occ(x: float) -> float:
-        return _clip01(x / 100.0 if x > 1.0 else x)
+    feature_vector: List[float] = []
 
-    def _bearing_deg(dx: float, dy: float) -> float:
-        # Convert Cartesian heading to the encoding convention: North=0, clockwise positive.
-        return (90.0 - math.degrees(math.atan2(dy, dx))) % 360.0
+    # === Expert 01: green utilization per phase and approach ===
+    gu_green, gu_waste, gu_flow = _update_green_utilization_and_get_matrices(
+        tls_id=tls_id,
+        cache=cache,
+        sim_step_duration=sim_step_duration,
+        saturation_flow_per_lane=saturation_flow_per_lane,
+        topology=topology,
+    )
 
-    def _polyline_heading(shape: list[tuple[float, float]], toward_end: bool) -> float:
-        # Use the first non-degenerate segment near the lane start/end to infer travel heading.
-        if len(shape) < 2:
-            return 0.0
-        pairs = zip(shape[:-1], shape[1:]) if not toward_end else zip(shape[-2::-1], shape[:0:-1])
-        for a, b in pairs:
-            dx = b[0] - a[0]
-            dy = b[1] - a[1]
-            if abs(dx) > 1e-6 or abs(dy) > 1e-6:
-                return _bearing_deg(dx, dy)
+    approaches_order = ["N", "E", "S", "W"]
+    actual_phases = len(gu_green)
+    num_tracked = max_tracked_service_phases
+
+    # Helper to read from possibly shorter matrices with zero padding.
+    def _get_mtx(mtx: List[List[float]], p_idx: int, a_idx: int) -> float:
+        if 0 <= p_idx < len(mtx):
+            row = mtx[p_idx]
+            if 0 <= a_idx < len(row):
+                return float(row[a_idx])
         return 0.0
 
-    def _circular_diff_deg(a: float, b: float) -> float:
-        return abs((a - b + 180.0) % 360.0 - 180.0)
+    # 1. green_utilization_ratio
+    for p in range(num_tracked):
+        for a_idx, _appr in enumerate(approaches_order):
+            feature_vector.append(_get_mtx(gu_green, p, a_idx))
 
-    def _parse_intersection(enc: str) -> list[dict[str, object]]:
-        # Shared parser for all expert components.
-        text = enc.strip()
-        if text.startswith("{") and text.endswith("}"):
-            text = text[1:-1]
+    # 2. wasted_green_seconds
+    for p in range(num_tracked):
+        for a_idx, _appr in enumerate(approaches_order):
+            feature_vector.append(_get_mtx(gu_waste, p, a_idx))
 
-        legs: list[dict[str, object]] = []
-        head_re = re.compile(
-            r"^\s*(?P<name>[A-Za-z0-9_]+)\s*@\s*(?P<bearing>\d+)" r"(?:\s*\^\s*(?P<offset>\([^)]*\))?)?\s*$"
-        )
+    # 3. discharge_flow_ratio
+    for p in range(num_tracked):
+        for a_idx, _appr in enumerate(approaches_order):
+            feature_vector.append(_get_mtx(gu_flow, p, a_idx))
 
-        for raw_leg in text.split(";"):
-            raw_leg = raw_leg.strip()
-            if not raw_leg or ":" not in raw_leg:
-                continue
+    # At this point, the expert_01 block has length 3 * num_tracked * 4.
+    # With default num_tracked=8, this is 96 dimensions.
 
-            head, body = raw_leg.split(":", 1)
-            m = head_re.match(head.strip())
-            if not m:
-                raise ValueError(f"Cannot parse leg header: {head!r}")
-
-            offset_text = m.group("offset") or ""
-            din = 0.0
-            dout = 0.0
-            if offset_text.startswith("(") and offset_text.endswith(")"):
-                vals = [v.strip() for v in offset_text[1:-1].split(",") if v.strip()]
-                if len(vals) == 1:
-                    din = dout = float(vals[0])
-                elif len(vals) >= 2:
-                    din = float(vals[0])
-                    dout = float(vals[1])
-
-            spec = body.strip()
-            outbound_only = spec.startswith("->")
-            no_outbound = spec.endswith("x") and not outbound_only
-
-            inbound_tokens: list[str] = []
-            lane_defs: list[dict[str, object]] = []
-            outbound_lane_count = 0
-
-            if outbound_only:
-                out_m = re.match(r"->\s*(\d+)", spec)
-                outbound_lane_count = int(out_m.group(1)) if out_m else 0
-            else:
-                lane_text = spec[:-1].strip() if no_outbound else spec
-                inbound_tokens = [tok.strip() for tok in lane_text.split("|") if tok.strip()]
-                outbound_lane_count = 0 if no_outbound else len(inbound_tokens)
-                for tok in inbound_tokens:
-                    lane_m = re.fullmatch(r"([LTR]+)(\d+(?:\.\d+)?)?", tok)
-                    if not lane_m:
-                        raise ValueError(f"Unsupported lane token {tok!r} on leg {m.group('name')!r}")
-                    lane_defs.append(
-                        {
-                            "token": tok,
-                            "dirs": lane_m.group(1),
-                            "dedicated_bay_m": float(lane_m.group(2)) if lane_m.group(2) else None,
-                        }
-                    )
-
-            legs.append(
-                {
-                    "name": m.group("name"),
-                    "bearing": float(m.group("bearing")),
-                    "din": din,
-                    "dout": dout,
-                    "outbound_only": outbound_only,
-                    "no_outbound": no_outbound,
-                    "outbound_exists": outbound_lane_count > 0,
-                    "inbound_tokens": inbound_tokens,
-                    "lane_defs": lane_defs,
-                    "storage_lengths": [
-                        float(x) for tok in inbound_tokens for x in re.findall(r"(\d+(?:\.\d+)?)", tok)
-                    ],
-                }
-            )
-        return legs
-
-    def _lane_moves(token: str) -> set[str]:
-        return {ch for ch in re.sub(r"\d+(?:\.\d+)?", "", token) if ch in {"L", "T", "R"}}
-
-    def _lane_number(token: str) -> float | None:
-        m = re.search(r"(\d+(?:\.\d+)?)", token)
-        return float(m.group(1)) if m else None
-
-    def _match_leg(candidate_bearing: float, eligible_legs: list[dict[str, object]]) -> str:
-        if not eligible_legs:
-            raise ValueError("No eligible legs available for bearing matching.")
-        return min(
-            eligible_legs,
-            key=lambda leg: _circular_diff_deg(candidate_bearing, float(leg["bearing"])),
-        )[
-            "name"
-        ]  # type: ignore[index]
-
-    legs = _parse_intersection(intersection_encoding)
-    legs_by_name = {str(leg["name"]): leg for leg in legs}
-    inbound_legs = [leg for leg in legs if leg["inbound_tokens"]]
-    outbound_legs = [leg for leg in legs if leg["outbound_exists"]]
-
-    tls_state = traci.trafficlight.getRedYellowGreenState(tls_id)
-    controlled_links = traci.trafficlight.getControlledLinks(tls_id)
-
-    # Resolve all controlled inbound/outbound lanes directly from the live junction.
-    unique_incoming_lanes: set[str] = set()
-    unique_outgoing_lanes: set[str] = set()
-    for link_group in controlled_links:
-        for link in link_group:
-            if not link:
-                continue
-            if link[0]:
-                unique_incoming_lanes.add(link[0])
-            if len(link) > 1 and link[1]:
-                unique_outgoing_lanes.add(link[1])
-
-    inbound_lane_to_leg: dict[str, str] = {}
-    for lane_id in unique_incoming_lanes:
-        shape = list(traci.lane.getShape(lane_id))
-        inbound_heading = _polyline_heading(shape, toward_end=True)
-        candidate_leg_bearing = (inbound_heading + 180.0) % 360.0
-        inbound_lane_to_leg[lane_id] = _match_leg(candidate_leg_bearing, inbound_legs)
-
-    outbound_lane_to_leg: dict[str, str] = {}
-    edge_to_outbound_leg: dict[str, str] = {}
-    for lane_id in unique_outgoing_lanes:
-        shape = list(traci.lane.getShape(lane_id))
-        outbound_bearing = _polyline_heading(shape, toward_end=False)
-        leg_name = _match_leg(outbound_bearing, outbound_legs)
-        outbound_lane_to_leg[lane_id] = leg_name
-        try:
-            edge_to_outbound_leg[traci.lane.getEdgeID(lane_id)] = leg_name
-        except Exception:
-            pass
-
-    # Order inbound lanes left-to-right to match the encoding token order.
-    lane_ids_by_leg: dict[str, list[str]] = {}
-    for leg in inbound_legs:
-        leg_name = str(leg["name"])
-        leg_lanes = [ln for ln, mapped_leg in inbound_lane_to_leg.items() if mapped_leg == leg_name]
-        approach_heading = (float(leg["bearing"]) + 180.0) % 360.0
-        heading_rad = math.radians(90.0 - approach_heading)
-        left_unit = (-math.sin(heading_rad), math.cos(heading_rad))
-
-        stop_points = []
-        for lane_id in leg_lanes:
-            shape = list(traci.lane.getShape(lane_id))
-            pt = shape[-1] if shape else (0.0, 0.0)
-            stop_points.append((lane_id, pt))
-        cx = sum(pt[0] for _, pt in stop_points) / max(1, len(stop_points))
-        cy = sum(pt[1] for _, pt in stop_points) / max(1, len(stop_points))
-
-        def _lane_left_to_right_key(lane_id: str) -> tuple[float, float]:
-            shape = list(traci.lane.getShape(lane_id))
-            pt = shape[-1] if shape else (cx, cy)
-            lateral = (pt[0] - cx) * left_unit[0] + (pt[1] - cy) * left_unit[1]
-            try:
-                lane_index = float(traci.lane.getIndex(lane_id))
-            except Exception:
-                lane_index = 0.0
-            return (lateral, lane_index)
-
-        leg_lanes.sort(key=_lane_left_to_right_key, reverse=True)
-        if len(leg_lanes) != len(leg["inbound_tokens"]):
-            raise ValueError(
-                f"Resolved {len(leg_lanes)} controlled inbound lanes for leg {leg_name}, "
-                f"but the encoding specifies {len(leg['inbound_tokens'])}."
-            )
-        lane_ids_by_leg[leg_name] = leg_lanes
-
-    # Resolve each visible approaching vehicle's next outbound leg from its live route.
-    vehicle_next_leg: dict[str, str] = {}
-    for leg_name, lane_ids in lane_ids_by_leg.items():
-        for lane_id in lane_ids:
-            for veh_id in traci.lane.getLastStepVehicleIDs(lane_id):
-                try:
-                    route = list(traci.vehicle.getRoute(veh_id))
-                    route_index = int(traci.vehicle.getRouteIndex(veh_id))
-                except Exception:
-                    route = []
-                    route_index = -1
-                if 0 <= route_index < len(route) - 1:
-                    next_edge = route[route_index + 1]
-                    if next_edge in edge_to_outbound_leg:
-                        vehicle_next_leg[veh_id] = edge_to_outbound_leg[next_edge]
-
-    def _inbound_heading(leg_name: str) -> float:
-        return (float(legs_by_name[leg_name]["bearing"]) + 180.0) % 360.0
-
-    def _abs_heading_diff(a: float, b: float) -> float:
-        return abs((a - b + 180.0) % 360.0 - 180.0)
-
-    def _infer_straight_dest(approach_leg: str) -> str | None:
-        h = _inbound_heading(approach_leg)
-        candidates = [leg for leg in outbound_legs if leg["name"] != approach_leg]
-        if not candidates:
-            return None
-        return min(candidates, key=lambda leg: _abs_heading_diff(h, float(leg["bearing"])))["name"]  # type: ignore[index]
-
-    def _infer_left_dest(approach_leg: str) -> str | None:
-        h = _inbound_heading(approach_leg)
-        candidates: list[tuple[float, str]] = []
-        for leg in outbound_legs:
-            if leg["name"] == approach_leg:
-                continue
-            left_angle = (h - float(leg["bearing"])) % 360.0
-            if 15.0 <= left_angle <= 165.0:
-                candidates.append((left_angle, str(leg["name"])))
-        if not candidates:
-            return None
-        candidates.sort(key=lambda x: x[0])
-        return candidates[0][1]
-
-    feature_vector: list[float] = []
-
-    # ---------------- Expert 1: critical lane-group persistent storage stress ----------------
-    expert1_cache = cache.setdefault(
-        "tsc_isolated_intersection_feature_vector__critical_lanegroup_storage_stress",
-        {},
-    )
-    lane_green_ratios: dict[str, list[float]] = {}
-    for sig_idx, link_group in enumerate(controlled_links):
-        signal_char = tls_state[sig_idx] if sig_idx < len(tls_state) else "r"
-        is_green = 1.0 if signal_char in ("g", "G") else 0.0
-        for link in link_group:
-            if link and link[0]:
-                lane_green_ratios.setdefault(link[0], []).append(is_green)
-
-    for leg in inbound_legs:
-        leg_name = str(leg["name"])
-        best_lane_features = {"persist": 0.0, "storage": 0.0, "residual": 0.0, "score": -1.0}
-
-        for lane_id, lane_def in zip(lane_ids_by_leg[leg_name], leg["lane_defs"]):
-            lane_len_m = float(traci.lane.getLength(lane_id))
-            vmax = max(0.1, float(traci.lane.getMaxSpeed(lane_id)))
-            mean_speed = float(traci.lane.getLastStepMeanSpeed(lane_id))
-            veh_n = float(traci.lane.getLastStepVehicleNumber(lane_id))
-            halt_n = float(traci.lane.getLastStepHaltingNumber(lane_id))
-            occ = _norm_occ(float(traci.lane.getLastStepOccupancy(lane_id)))
-            waiting_time_total = float(traci.lane.getWaitingTime(lane_id))
-            mean_vehicle_len = float(traci.lane.getLastStepLength(lane_id)) if veh_n > 0 else 5.5
-
-            effective_storage_m = lane_len_m
-            if lane_def["dedicated_bay_m"] is not None:
-                effective_storage_m = min(effective_storage_m, float(lane_def["dedicated_bay_m"]))
-
-            effective_vehicle_spacing = max(jam_vehicle_spacing_m, mean_vehicle_len + 2.0)
-            storage_slots = max(1.0, effective_storage_m / effective_vehicle_spacing)
-
-            queue_frac = _clip01(halt_n / storage_slots)
-            wait_per_vehicle = waiting_time_total / max(veh_n, 1.0)
-            wait_norm = _clip01(wait_per_vehicle / wait_cap_s)
-            speed_norm = _clip01(mean_speed / vmax)
-
-            lane_states = lane_green_ratios.get(lane_id, [])
-            green_ratio = sum(lane_states) / len(lane_states) if lane_states else 0.0
-
-            # Preserve the expert overload logic: blocked queue under red + residual queue under service.
-            red_deficit = queue_frac * (1.0 - green_ratio)
-            green_residual = queue_frac * green_ratio * (1.0 - speed_norm)
-            instant_overload = _clip01(0.50 * red_deficit + 0.30 * green_residual + 0.20 * wait_norm)
-
-            prev = expert1_cache.get(lane_id, {})
-            prev_persist = float(prev.get("persist", instant_overload))
-            prev_green = float(prev.get("green_ratio", 0.0))
-            prev_queue = float(prev.get("queue_frac", 0.0))
-
-            persist = _clip01(ema_alpha * prev_persist + (1.0 - ema_alpha) * instant_overload)
-            storage = _clip01(0.70 * queue_frac + 0.30 * occ)
-            carryover_hint = queue_frac if (prev_green > 0.0 and prev_queue > 0.20 and queue_frac > 0.10) else 0.0
-            residual = _clip01(0.50 * green_residual + 0.35 * persist + 0.15 * carryover_hint)
-            critical_score = 0.45 * persist + 0.35 * storage + 0.20 * residual
-
-            expert1_cache[lane_id] = {"persist": persist, "queue_frac": queue_frac, "green_ratio": green_ratio}
-
-            if critical_score > best_lane_features["score"]:
-                best_lane_features = {
-                    "persist": persist,
-                    "storage": storage,
-                    "residual": residual,
-                    "score": critical_score,
-                }
-
-        feature_vector.extend(
-            [
-                round(best_lane_features["persist"], 6),
-                round(best_lane_features["storage"], 6),
-                round(best_lane_features["residual"], 6),
-            ]
-        )
-
-    # ---------------- Expert 2: opposing-gap sufficiency for the two relevant left turns ----------------
-    def _vehicle_eta_to_stopline(lane_id: str, veh_id: str) -> tuple[float, float]:
-        lane_len = float(traci.lane.getLength(lane_id))
-        lane_pos = float(traci.vehicle.getLanePosition(veh_id))
-        dist_to_stop = max(0.0, lane_len - lane_pos)
-        speed = float(traci.vehicle.getSpeed(veh_id))
-        lane_vmax = float(traci.lane.getMaxSpeed(lane_id))
-        if dist_to_stop <= 8.0:
-            eta = 0.0
-        else:
-            eff_speed = speed if speed > 1.0 else max(min_running_speed_mps, 0.5 * lane_vmax)
-            eta = dist_to_stop / max(0.1, eff_speed)
-        return dist_to_stop, eta
-
-    def _lane_arrival_times(
-        lane_id: str,
-        target_leg: str,
-        max_dist_m: float,
-        discharge_headway_s: float = 1.2,
-    ) -> list[float]:
-        vehs = list(traci.lane.getLastStepVehicleIDs(lane_id))
-        vehs.sort(key=lambda vid: float(traci.vehicle.getLanePosition(vid)), reverse=True)
-        arrivals: list[float] = []
-        last_t = -1e9
-        for vid in vehs:
-            if vehicle_next_leg.get(vid) != target_leg:
-                continue
-            dist, eta = _vehicle_eta_to_stopline(lane_id, vid)
-            if dist > max_dist_m:
-                continue
-            eta = max(eta, last_t + discharge_headway_s) if arrivals else eta
-            if eta <= prediction_horizon_s:
-                arrivals.append(eta)
-                last_t = eta
-        return arrivals
-
-    def _left_demand_equiv(approach_leg: str, dest_leg: str, lane_indices: list[int], max_dist_m: float) -> float:
-        demand = 0.0
-        for idx in lane_indices:
-            lane_id = lane_ids_by_leg[approach_leg][idx]
-            for vid in traci.lane.getLastStepVehicleIDs(lane_id):
-                if vehicle_next_leg.get(vid) != dest_leg:
-                    continue
-                dist, eta = _vehicle_eta_to_stopline(lane_id, vid)
-                if dist > max_dist_m:
-                    continue
-                if eta <= 2.0:
-                    demand += 1.00
-                elif eta <= 6.0:
-                    demand += 0.80
-                elif eta <= prediction_horizon_s:
-                    demand += 0.55
-                else:
-                    demand += 0.25
-        return demand
-
-    def _left_turn_angle_deg(approach_leg: str, dest_leg: str) -> float:
-        return (_inbound_heading(approach_leg) - float(legs_by_name[dest_leg]["bearing"])) % 360.0
-
-    def _adjusted_critical_gap(approach_leg: str, dest_leg: str) -> float:
-        left_angle = _left_turn_angle_deg(approach_leg, dest_leg)
-        skew_factor = 1.0 + 0.15 * abs(left_angle - 90.0) / 90.0
-        offset_factor = 1.0 + 0.02 * (
-            abs(float(legs_by_name[approach_leg]["din"])) + abs(float(legs_by_name[dest_leg]["dout"]))
-        )
-        return base_critical_gap_s * skew_factor * offset_factor
-
-    def _service_slots(arrivals: list[float], critical_gap_s: float) -> float:
-        arrivals = sorted(t for t in arrivals if 0.0 <= t <= prediction_horizon_s)
-        if not arrivals:
-            gaps = [prediction_horizon_s]
-        else:
-            gaps = [arrivals[0]]
-            for i in range(1, len(arrivals)):
-                gaps.append(arrivals[i] - arrivals[i - 1])
-            gaps.append(prediction_horizon_s - arrivals[-1])
-
-        slots = 0.0
-        for gap in gaps:
-            if gap >= critical_gap_s:
-                slots += 1.0 + max(0.0, (gap - critical_gap_s) / max(0.1, follow_up_gap_s))
-        return slots
-
-    gap_scores: list[float] = []
-    movement_specs = [("S", _infer_left_dest("S"), "W"), ("W", _infer_left_dest("W"), "E")]
-    for approach_leg, dest_leg, conflict_leg in movement_specs:
-        if approach_leg not in legs_by_name or dest_leg is None or conflict_leg not in legs_by_name:
-            gap_scores.append(0.5)
-            continue
-
-        approach_lane_tokens = list(legs_by_name[approach_leg]["inbound_tokens"])
-        conflict_lane_tokens = list(legs_by_name[conflict_leg]["inbound_tokens"])
-
-        left_lane_indices = [i for i, tok in enumerate(approach_lane_tokens) if "L" in _lane_moves(tok)]
-        if not left_lane_indices:
-            gap_scores.append(0.5)
-            continue
-
-        pocket_caps = [
-            _lane_number(approach_lane_tokens[i])
-            for i in left_lane_indices
-            if _lane_number(approach_lane_tokens[i]) is not None
-        ]
-        observed_left_zone_m = min(detection_distance_m, min(pocket_caps)) if pocket_caps else detection_distance_m
-
-        conflict_straight_dest = _infer_straight_dest(conflict_leg)
-        if conflict_straight_dest is None:
-            gap_scores.append(0.5)
-            continue
-
-        conflict_lane_indices = [i for i, tok in enumerate(conflict_lane_tokens) if "T" in _lane_moves(tok)]
-        demand_equiv = _left_demand_equiv(approach_leg, dest_leg, left_lane_indices, observed_left_zone_m)
-
-        conflicting_arrivals: list[float] = []
-        for idx in conflict_lane_indices:
-            conflicting_arrivals.extend(
-                _lane_arrival_times(
-                    lane_ids_by_leg[conflict_leg][idx],
-                    conflict_straight_dest,
-                    detection_distance_m,
-                )
-            )
-
-        critical_gap_s = _adjusted_critical_gap(approach_leg, dest_leg)
-        service_slots = _service_slots(conflicting_arrivals, critical_gap_s)
-        balance = (service_slots - demand_equiv) / 1.25
-        gap_scores.append(_clip01(1.0 / (1.0 + math.exp(-balance))))
-
-    mean_gap_score = sum(gap_scores) / len(gap_scores) if gap_scores else 0.5
-    feature_vector.extend([round(gap_scores[0], 6), round(gap_scores[1], 6), round(mean_gap_score, 6)])
-
-    # ---------------- Expert 3: transition clearance risk + transition/startup loss ----------------
-    expert3_cache = cache.setdefault(
-        "tsc_isolated_intersection_feature_vector__transition_clearance_loss",
-        {},
+    # === Expert 02: approach arrival headway profile ===
+    lane_ids_per_approach: Dict[str, List[str]] = topology["lane_ids_per_approach"]
+    headway_profile = compute_approach_headway_profile(
+        traci_module=traci,
+        lane_ids_per_approach=lane_ids_per_approach,
+        prediction_horizon_s=arrival_prediction_horizon_s,
+        queue_speed_threshold_mps=arrival_queue_speed_threshold_mps,
+        platoon_headway_threshold_s=arrival_platoon_headway_threshold_s,
+        queue_region_m=arrival_queue_region_m,
     )
 
-    def _is_green(ch: str) -> bool:
-        return ch in ("g", "G")
+    next_tta = headway_profile["approach_next_arrival_tta_s"]
+    mean_hw = headway_profile["approach_mean_imminent_headway_s"]
+    std_hw = headway_profile["approach_std_imminent_headway_s"]
+    platoon_cnt = headway_profile["approach_platoon_short_headway_count"]
 
-    def _is_yellow(ch: str) -> bool:
-        return ch in ("y", "Y")
+    for v in next_tta:
+        feature_vector.append(float(v))
+    for v in mean_hw:
+        feature_vector.append(float(v))
+    for v in std_hw:
+        feature_vector.append(float(v))
+    for v in platoon_cnt:
+        feature_vector.append(float(v))
 
-    def _compute_geometry_severity() -> float:
-        if not legs:
-            return 0.0
+    # Expert_02 contributes 4 * 4 = 16 dimensions.
 
-        offset_score = sum(min(1.0, (abs(float(leg["din"])) + abs(float(leg["dout"]))) / 4.0) for leg in legs) / len(
-            legs
-        )
+    # === Expert 03: queue discharge dynamics at green onset ===
+    current_time = float(traci.simulation.getTime())
+    movement_definitions = topology["movement_definitions"]
 
-        opposite_pair_skews = []
-        for i in range(len(legs)):
-            for j in range(i + 1, len(legs)):
-                diff = _circular_diff_deg(float(legs[i]["bearing"]), float(legs[j]["bearing"]))
-                if diff > 135.0:
-                    opposite_pair_skews.append(min(1.0, abs(180.0 - diff) / 25.0))
-        skew_score = sum(opposite_pair_skews) / len(opposite_pair_skews) if opposite_pair_skews else 0.0
+    # Ensure discharge_config honors headway_K used for feature layout.
+    if discharge_config is None:
+        discharge_config = {}
+    else:
+        discharge_config = dict(discharge_config)  # shallow copy to avoid side effects
+    discharge_config.setdefault("headway_K", headway_K)
 
-        one_way_score = sum(1.0 for leg in legs if bool(leg["outbound_only"]) or bool(leg["no_outbound"])) / len(legs)
+    discharge_features = compute_green_onset_discharge_features(
+        traci_module=traci,
+        tls_id=tls_id,
+        current_time=current_time,
+        movement_definitions=movement_definitions,
+        cache=cache,
+        config=discharge_config,
+    )
 
-        storage_terms = []
-        for leg in legs:
-            for storage_len in leg["storage_lengths"]:
-                storage_terms.append(max(0.0, 1.0 - min(float(storage_len), 120.0) / 120.0))
-        storage_score = sum(storage_terms) / len(storage_terms) if storage_terms else 0.0
-
-        return _clip01(0.35 * skew_score + 0.25 * offset_score + 0.25 * one_way_score + 0.15 * storage_score)
-
-    def _iter_unique_start_lanes(signal_indices: list[int]) -> list[str]:
-        seen = set()
-        lanes: list[str] = []
-        for idx in signal_indices:
-            if idx >= len(controlled_links):
-                continue
-            for link in controlled_links[idx]:
-                if link and link[0] and link[0] not in seen:
-                    seen.add(link[0])
-                    lanes.append(link[0])
-        return lanes
-
-    def _estimate_max_clearance_time(signal_indices: list[int], geometry_severity: float) -> float:
-        max_time = 0.0
-        fallback_crossing_m = 12.0 + 8.0 * geometry_severity
-
-        for idx in signal_indices:
-            if idx >= len(controlled_links):
-                continue
-            for link in controlled_links[idx]:
-                if not link:
-                    continue
-                in_lane = link[0]
-                out_lane = link[1] if len(link) > 1 else ""
-                via_lane = link[2] if len(link) > 2 else ""
-
-                if via_lane:
-                    try:
-                        via_len = float(traci.lane.getLength(via_lane))
-                    except Exception:
-                        via_len = fallback_crossing_m
-                    for veh_id in traci.lane.getLastStepVehicleIDs(via_lane):
-                        try:
-                            remaining = max(0.0, via_len - float(traci.vehicle.getLanePosition(veh_id)))
-                            speed = max(1.5, float(traci.vehicle.getSpeed(veh_id)))
-                            max_time = max(max_time, remaining / speed)
-                        except Exception:
-                            continue
-
-                if not in_lane:
-                    continue
-
-                try:
-                    lane_len = float(traci.lane.getLength(in_lane))
-                except Exception:
-                    continue
-
-                for veh_id in traci.lane.getLastStepVehicleIDs(in_lane):
-                    try:
-                        lane_pos = float(traci.vehicle.getLanePosition(veh_id))
-                        dist_to_stop = max(0.0, lane_len - lane_pos)
-                        speed = max(0.0, float(traci.vehicle.getSpeed(veh_id)))
-                        veh_len = max(4.5, float(traci.vehicle.getLength(veh_id)))
-                    except Exception:
-                        continue
-
-                    commit_zone_m = max(8.0, 2.0 * speed + 0.5 * veh_len)
-                    if dist_to_stop > min(commit_distance_m, commit_zone_m + 10.0):
-                        continue
-
-                    crossing_m = fallback_crossing_m
-                    if via_lane:
-                        try:
-                            crossing_m = max(crossing_m, float(traci.lane.getLength(via_lane)))
-                        except Exception:
-                            pass
-                    elif out_lane:
-                        try:
-                            crossing_m = max(crossing_m, 0.35 * float(traci.lane.getLength(out_lane)))
-                        except Exception:
-                            pass
-
-                    traversal_speed = max(4.0, speed)
-                    max_time = max(max_time, (dist_to_stop + crossing_m) / traversal_speed)
-
-        return max_time
-
-    geometry_severity = _compute_geometry_severity()
-    now = float(traci.simulation.getTime())
-    next_switch = float(traci.trafficlight.getNextSwitch(tls_id))
-    remaining_in_phase_s = max(0.0, next_switch - now)
-
-    if "prev_state" not in expert3_cache:
-        expert3_cache.update(
+    approaches_for_discharge = ["N", "E", "S", "W"]
+    # Per approach, we flatten:
+    # [initial_queue_length, headways[0..K-1],
+    #  start_delay, discharge_rate, time_to_clear, fraction_discharged_10s, queue_cleared_flag]
+    for appr in approaches_for_discharge:
+        feats = discharge_features.get(
+            appr,
             {
-                "prev_state": tls_state,
-                "yellow_start_time": None,
-                "green_start_time": None,
-                "last_transition_duration_s": 0.0,
-                "startup_queue_present": False,
-                "startup_watch": {},
-                "startup_loss_s": 0.0,
-                "ending_signal_indices": [],
-                "clearance_risk": 0.35 + 0.30 * geometry_severity,
-            }
+                "initial_queue_length_at_green": 0,
+                "headways_first_5_vehicles_from_queue": [0.0] * headway_K,
+                "start_vehicle_delay_first_from_green": 0.0,
+                "discharge_rate_first_10s": 0.0,
+                "time_to_clear_initial_queue": 0.0,
+                "fraction_of_initial_queue_discharged_in_10s": 0.0,
+                "queue_cleared_flag": 0,
+            },
         )
-
-    prev_state = str(expert3_cache["prev_state"])
-    if tls_state != prev_state:
-        ending_signal_indices = [
-            i for i, (old, new) in enumerate(zip(prev_state, tls_state)) if _is_green(old) and not _is_green(new)
-        ]
-        starting_signal_indices = [
-            i for i, (old, new) in enumerate(zip(prev_state, tls_state)) if not _is_green(old) and _is_green(new)
-        ]
-
-        if ending_signal_indices:
-            expert3_cache["yellow_start_time"] = now
-            expert3_cache["ending_signal_indices"] = ending_signal_indices
-
-        if starting_signal_indices:
-            yellow_start_time = expert3_cache.get("yellow_start_time")
-            if isinstance(yellow_start_time, (int, float)):
-                expert3_cache["last_transition_duration_s"] = max(0.0, now - float(yellow_start_time))
-            expert3_cache["green_start_time"] = now
-
-            startup_watch: dict[str, set[str]] = {}
-            startup_queue_present = False
-            for lane_id in _iter_unique_start_lanes(starting_signal_indices):
-                watched: set[str] = set()
-                try:
-                    lane_len = float(traci.lane.getLength(lane_id))
-                    veh_ids = list(traci.lane.getLastStepVehicleIDs(lane_id))
-                    halting = int(traci.lane.getLastStepHaltingNumber(lane_id))
-                except Exception:
-                    lane_len = 0.0
-                    veh_ids = []
-                    halting = 0
-
-                for veh_id in veh_ids:
-                    try:
-                        dist_to_stop = max(0.0, lane_len - float(traci.vehicle.getLanePosition(veh_id)))
-                        if dist_to_stop <= startup_queue_distance_m:
-                            watched.add(veh_id)
-                    except Exception:
-                        continue
-
-                startup_watch[lane_id] = watched
-                if halting > 0 or watched:
-                    startup_queue_present = True
-
-            expert3_cache["startup_watch"] = startup_watch
-            expert3_cache["startup_queue_present"] = startup_queue_present
-            expert3_cache["startup_loss_s"] = None if startup_queue_present else 0.0
-
-    transition_active = any(_is_yellow(ch) for ch in tls_state) or (
-        expert3_cache.get("yellow_start_time") is not None
-        and (
-            expert3_cache.get("green_start_time") is None
-            or float(expert3_cache["green_start_time"]) < float(expert3_cache["yellow_start_time"])
-        )
-    )
-
-    ending_signal_indices = list(expert3_cache.get("ending_signal_indices", []))
-    if transition_active and ending_signal_indices:
-        max_clearance_time = _estimate_max_clearance_time(ending_signal_indices, geometry_severity)
-        time_margin_s = remaining_in_phase_s - max_clearance_time
-        expert3_cache["clearance_risk"] = _clip01(0.5 - time_margin_s / 6.0 + 0.15 * geometry_severity)
-    else:
-        baseline_risk = 0.25 + 0.30 * geometry_severity
-        expert3_cache["clearance_risk"] = _clip01(0.85 * float(expert3_cache["clearance_risk"]) + 0.15 * baseline_risk)
-
-    startup_loss_s = expert3_cache.get("startup_loss_s")
-    if expert3_cache.get("startup_queue_present") and expert3_cache.get("green_start_time") is not None:
-        green_elapsed_s = max(0.0, now - float(expert3_cache["green_start_time"]))
-        if startup_loss_s is None:
-            discharged = False
-            startup_watch = expert3_cache.get("startup_watch", {})
-            if isinstance(startup_watch, dict):
-                for lane_id, watched_ids in startup_watch.items():
-                    for veh_id in list(watched_ids):
-                        try:
-                            current_lane = traci.vehicle.getLaneID(veh_id)
-                            speed = float(traci.vehicle.getSpeed(veh_id))
-                            if current_lane != lane_id or speed > 2.0:
-                                discharged = True
-                                break
-                        except Exception:
-                            discharged = True
-                            break
-                    if discharged:
-                        break
-
-            if discharged:
-                expert3_cache["startup_loss_s"] = max(0.0, green_elapsed_s - 0.7)
-            elif green_elapsed_s >= 6.0:
-                expert3_cache["startup_loss_s"] = nominal_startup_loss_s
-
-    if transition_active and expert3_cache.get("yellow_start_time") is not None:
-        transition_duration_s = max(0.0, now - float(expert3_cache["yellow_start_time"]))
-    else:
-        transition_duration_s = float(expert3_cache.get("last_transition_duration_s", 0.0))
-
-    transition_loss_norm = _clip01(transition_duration_s / nominal_transition_s)
-    startup_loss_s = expert3_cache.get("startup_loss_s")
-    if expert3_cache.get("startup_queue_present"):
-        if startup_loss_s is None and expert3_cache.get("green_start_time") is not None:
-            ongoing_loss_s = max(0.0, now - float(expert3_cache["green_start_time"]) - 0.7)
-            startup_loss_norm = _clip01(ongoing_loss_s / nominal_startup_loss_s)
+        feature_vector.append(float(feats["initial_queue_length_at_green"]))
+        headways_list = list(feats["headways_first_5_vehicles_from_queue"])
+        if len(headways_list) < headway_K:
+            headways_list = headways_list + [0.0] * (headway_K - len(headways_list))
         else:
-            startup_loss_norm = _clip01(float(startup_loss_s) / nominal_startup_loss_s)
-    else:
-        startup_loss_norm = 0.0
-
-    effective_green_loss = _clip01(0.55 * transition_loss_norm + 0.45 * startup_loss_norm)
-    expert3_cache["prev_state"] = tls_state
-
-    feature_vector.extend(
-        [
-            round(float(expert3_cache["clearance_risk"]), 6),
-            round(float(effective_green_loss), 6),
-            round(float(geometry_severity), 6),
-        ]
-    )
-
-    # ---------------- Expert 4: latest cycle startup/clearance loss profile ----------------
-    expert4_cache = cache.setdefault(
-        "tsc_isolated_intersection_feature_vector__cycle_green_loss_profile",
-        {},
-    )
-    output_legs = [str(leg["name"]) for leg in inbound_legs]
-
-    def _ang_diff(a: float, b: float) -> float:
-        d = abs((a - b) % 360.0)
-        return min(d, 360.0 - d)
-
-    def _clearance_cap_for_leg(leg_name: str) -> float:
-        leg = legs_by_name.get(leg_name, {})
-        bearing = float(leg.get("bearing", 0.0))
-        skew = min(_ang_diff(bearing, c) for c in (0.0, 90.0, 180.0, 270.0))
-        offset_mag = abs(float(leg.get("din", 0.0))) + abs(float(leg.get("dout", 0.0)))
-        factor = 1.0 + 0.35 * min(1.0, skew / 30.0) + 0.20 * min(1.0, offset_mag / 2.0)
-        return clearance_cap_s * factor
-
-    def _green_inbound_lanes() -> set[str]:
-        green_lanes: set[str] = set()
-        for idx, link_group in enumerate(controlled_links):
-            if idx >= len(tls_state) or tls_state[idx] not in ("g", "G", "s"):
-                continue
-            for conn in link_group:
-                if conn and conn[0]:
-                    green_lanes.add(conn[0])
-        return green_lanes
-
-    if tls_id not in expert4_cache:
-        expert4_cache[tls_id] = {
-            "prev_time": now,
-            "prev_lane_ids": {},
-            "prev_lane_pos": {},
-            "episodes": {leg: None for leg in output_legs},
-            "profile": {leg: {"startup": 0.25, "clearance": 0.25} for leg in output_legs},
-        }
-
-    state4 = expert4_cache[tls_id]
-    prev_time = float(state4.get("prev_time", now))
-    step_dt = max(0.1, now - prev_time) if now > prev_time else 0.1
-
-    current_lane_ids: dict[str, set[str]] = {}
-    current_lane_pos: dict[str, dict[str, float]] = {}
-    leg_departures = {leg: 0 for leg in output_legs}
-    leg_halts = {leg: 0 for leg in output_legs}
-
-    for leg_name in output_legs:
-        for lane_id in lane_ids_by_leg.get(leg_name, []):
-            veh_ids = list(traci.lane.getLastStepVehicleIDs(lane_id))
-            veh_set = set(veh_ids)
-            pos_map: dict[str, float] = {}
-            for vid in veh_ids:
-                try:
-                    pos_map[vid] = float(traci.vehicle.getLanePosition(vid))
-                except Exception:
-                    continue
-
-            current_lane_ids[lane_id] = veh_set
-            current_lane_pos[lane_id] = pos_map
-            leg_halts[leg_name] += int(traci.lane.getLastStepHaltingNumber(lane_id))
-
-            prev_ids = state4["prev_lane_ids"].get(lane_id, set())
-            prev_pos = state4["prev_lane_pos"].get(lane_id, {})
-            lane_len = float(traci.lane.getLength(lane_id))
-            for vid in prev_ids - veh_set:
-                if prev_pos.get(vid, -1e9) >= lane_len - depart_zone_m:
-                    leg_departures[leg_name] += 1
-
-    green_lanes = _green_inbound_lanes()
-    for leg_name in output_legs:
-        active_lanes = [ln for ln in lane_ids_by_leg.get(leg_name, []) if ln in green_lanes]
-        served_now = len(active_lanes) > 0
-        episode = state4["episodes"].get(leg_name)
-
-        if served_now and episode is None:
-            onset_queue = sum(int(traci.lane.getLastStepHaltingNumber(ln)) for ln in active_lanes)
-            episode = {
-                "start_time": now,
-                "active_lanes": tuple(active_lanes),
-                "n_lanes": max(1, len(active_lanes)),
-                "onset_queue": max(0, onset_queue),
-                "departures": 0,
-                "startup_norm": 0.0 if onset_queue <= 0 else state4["profile"][leg_name]["startup"],
-                "startup_frozen": onset_queue <= 0,
-                "last_depart_time": None,
-                "clearance_cap_s": _clearance_cap_for_leg(leg_name),
-            }
-            state4["episodes"][leg_name] = episode
-
-        if served_now and episode is not None:
-            episode["active_lanes"] = tuple(active_lanes)
-            episode["n_lanes"] = max(1, len(active_lanes))
-            episode["departures"] += int(leg_departures[leg_name])
-            if leg_departures[leg_name] > 0:
-                episode["last_depart_time"] = now
-
-            if not episode["startup_frozen"]:
-                target_departures = min(
-                    int(episode["onset_queue"]),
-                    int(startup_equiv_veh_per_lane * episode["n_lanes"]),
-                )
-                if target_departures <= 0:
-                    episode["startup_norm"] = 0.0
-                    episode["startup_frozen"] = True
-                else:
-                    startup_window_s = target_departures * sat_headway_s / max(episode["n_lanes"], 1)
-                    elapsed_s = max(0.0, now - episode["start_time"])
-                    effective_elapsed_s = min(elapsed_s, startup_window_s)
-                    observed = min(int(episode["departures"]), target_departures)
-                    ideal_equiv_s = observed * sat_headway_s / max(episode["n_lanes"], 1)
-                    startup_loss_s = max(0.0, effective_elapsed_s - ideal_equiv_s)
-                    episode["startup_norm"] = _clip01(startup_loss_s / max(startup_cap_s, 1e-6))
-                    if observed >= target_departures or effective_elapsed_s >= startup_window_s:
-                        episode["startup_frozen"] = True
-
-            pending_clearance_norm = 0.0
-            if leg_halts[leg_name] <= 0 and episode["last_depart_time"] is not None:
-                pending_clearance_norm = _clip01(
-                    (now - episode["last_depart_time"]) / max(episode["clearance_cap_s"], 1e-6)
-                )
-
-            state4["profile"][leg_name] = {
-                "startup": _clip01(episode["startup_norm"]),
-                "clearance": pending_clearance_norm,
-            }
-
-        elif (not served_now) and episode is not None:
-            last_depart_time = (
-                episode["last_depart_time"] if episode["last_depart_time"] is not None else episode["start_time"]
-            )
-            tail_gap_s = max(0.0, now - last_depart_time)
-            clearance_loss_s = min(episode["clearance_cap_s"], step_dt + tail_gap_s)
-            state4["profile"][leg_name] = {
-                "startup": _clip01(episode["startup_norm"]),
-                "clearance": _clip01(clearance_loss_s / max(episode["clearance_cap_s"], 1e-6)),
-            }
-            state4["episodes"][leg_name] = None
-
-    state4["prev_time"] = now
-    state4["prev_lane_ids"] = current_lane_ids
-    state4["prev_lane_pos"] = current_lane_pos
-
-    global_startup = _clip01(
-        sum(float(state4["profile"][leg]["startup"]) for leg in output_legs) / max(1, len(output_legs))
-    )
-    global_clearance = _clip01(
-        sum(float(state4["profile"][leg]["clearance"]) for leg in output_legs) / max(1, len(output_legs))
-    )
-
-    feature_vector.extend([round(global_startup, 6), round(global_clearance, 6)])
-    for leg_name in output_legs:
-        feature_vector.extend(
-            [
-                round(_clip01(float(state4["profile"][leg_name]["startup"])), 6),
-                round(_clip01(float(state4["profile"][leg_name]["clearance"])), 6),
-            ]
+            headways_list = headways_list[:headway_K]
+        for hw in headways_list:
+            feature_vector.append(float(hw))
+        feature_vector.append(float(feats["start_vehicle_delay_first_from_green"]))
+        feature_vector.append(float(feats["discharge_rate_first_10s"]))
+        feature_vector.append(float(feats["time_to_clear_initial_queue"]))
+        feature_vector.append(
+            float(feats["fraction_of_initial_queue_discharged_in_10s"])
         )
+        feature_vector.append(float(feats["queue_cleared_flag"]))
+
+    # With default headway_K=5, expert_03 contributes 4 * (1 + 5 + 5) = 44 dimensions.
+
+    # === Expert 04: lane-group saturation ratio per approach ===
+    lane_group_ids: List[str] = topology["lane_group_ids"]
+    lane_group_definitions: Dict[str, List[str]] = topology["lane_group_definitions"]
+
+    sat_ratios, demands_veh, capacities_veh = (
+        compute_lane_group_saturation_short_horizon(
+            lane_group_ids=lane_group_ids,
+            lane_group_definitions=lane_group_definitions,
+            detection_zone_length_m=saturation_detection_zone_length_m,
+            saturation_flow_rate_per_lane_veh_per_s=saturation_flow_rate_per_lane_veh_per_s,
+            decision_horizon_seconds=saturation_decision_horizon_seconds,
+        )
+    )
+
+    for v in sat_ratios:
+        feature_vector.append(float(v))
+    for v in demands_veh:
+        feature_vector.append(float(v))
+    for v in capacities_veh:
+        feature_vector.append(float(v))
+
+    # With 4 lane groups [N,E,S,W], expert_04 contributes 12 dimensions.
 
     return feature_vector
