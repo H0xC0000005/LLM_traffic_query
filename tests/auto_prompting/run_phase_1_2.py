@@ -6,9 +6,11 @@ from pathlib import Path
 from aprompt.llm import DryRunClient, OpenAIResponsesClient
 from aprompt.orchestrator import TopicFormationOrchestrator
 from aprompt.topic_to_code_orchestrator import TopicToCodeOrchestrator
+import time
 
 
 def main() -> None:
+    start_time = time.time()
     parser = argparse.ArgumentParser(description="Run topic formation and topic-to-code prompting.")
     parser.add_argument("--template", required=True, help="Path to prompt template YAML.")
     parser.add_argument("--task-vars", required=True, help="Path to task variable YAML.")
@@ -26,6 +28,11 @@ def main() -> None:
         "--feature-plan-web-search",
         action="store_true",
         help="Enable OpenAI web_search tool for expert scenario-specific feature-plan prompts.",
+    )
+    parser.add_argument(
+        "--assembler-web-search",
+        action="store_true",
+        help="Enable OpenAI web_search tool for assembler implementation/API resolution.",
     )
     parser.add_argument("--model", default=None, help="Optional exact OpenAI model override.")
     parser.add_argument("--temperature", type=float, default=None)
@@ -56,7 +63,8 @@ def main() -> None:
         max_refine_count=args.max_refine_count,
     )
     topic_orchestrator.run()
-
+    topic_time = time.time()
+    print(f">>>>> Topic formation execution time: {topic_time - start_time:.2f} seconds")
     code_orchestrator = TopicToCodeOrchestrator(
         experts=topic_orchestrator.experts,
         template_store=topic_orchestrator.template_store,
@@ -66,8 +74,11 @@ def main() -> None:
         interactive=not args.non_interactive,
         call_index=topic_orchestrator.call_index,
         enable_feature_plan_web_search=args.feature_plan_web_search,
+        enable_assembler_web_search=args.assembler_web_search,
     )
     code_orchestrator.run()
+    end_time = time.time()
+    print(f">>>>> Total execution time: {end_time - start_time:.2f} seconds")
 
 
 if __name__ == "__main__":

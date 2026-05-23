@@ -33,7 +33,6 @@ class TopicToCodeOrchestrator:
         interactive: bool = True,
         call_index: int = 0,
         enable_feature_plan_web_search: bool = False,
-        enable_assembler_web_search: bool = False,
     ) -> None:
         self.experts = experts
         self.template_store = template_store
@@ -47,7 +46,6 @@ class TopicToCodeOrchestrator:
         self.expert_code_pieces: dict[str, dict[str, Any]] = {}
         self.assembler_result: dict[str, Any] | None = None
         self.enable_feature_plan_web_search = enable_feature_plan_web_search
-        self.enable_assembler_web_search = enable_assembler_web_search
 
     def run(self) -> dict[str, Any]:
         self.run_dir.mkdir(parents=True, exist_ok=True)
@@ -66,13 +64,6 @@ class TopicToCodeOrchestrator:
     
     def _feature_plan_tools(self) -> list[dict[str, Any]] | None:
         if not self.enable_feature_plan_web_search:
-            return None
-        return [{"type": "web_search"}]
-
-    # Assembler API-resolution support: enable web search only for the final
-    # assembler call, where simulator/library API details must be resolved.
-    def _assembler_tools(self) -> list[dict[str, Any]] | None:
-        if not self.enable_assembler_web_search:
             return None
         return [{"type": "web_search"}]
 
@@ -159,7 +150,7 @@ class TopicToCodeOrchestrator:
             "expert_code_pieces_yaml": dump_yaml(assembler_code_pieces),
         }
         messages = self.template_store.render_messages("assembler.assemble_feature_function", context)
-        result = self.llm.generate(messages, tools=self._assembler_tools())
+        result = self.llm.generate(messages)
         parsed = validate_assembler_result(parse_yaml_response(result.text))
         self.assembler_result = parsed
 
