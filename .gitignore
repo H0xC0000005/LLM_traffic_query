@@ -23,6 +23,7 @@ memo.txt
 **/auto_prompting/runs/
 **/LLMFE/logs
 **/LLMFE/results_energy_llmfe
+**/LLMFE/data_energy
 
 *.ftr
 
