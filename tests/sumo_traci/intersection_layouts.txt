@@ -1,0 +1,14 @@
+The intersection is represented with a compact encoding, which only takes down the shape of legs and lane permissions. The intersection encoding contains the entering degree of each leg and the lane configuration of the incoming leg. If a number is attached to a lane, it means that lane is a dedicated turning lane starting from x meters from the intersection. The outgoing direction of each leg is assumed to have the same lane configuration as the incoming direction, unless an “x” is provided, denoting that the leg has no outbound lanes. -><integer> format denotes an outbound only leg, with the integer outbound lane number. The format is as follows:
+{(<leg> := <leg_name> [ @ <bearing_deg> ] : <lane_direction> ( | <lane_direction> )*x?)*} 
+For example, {N@0:LT|T|TR; E@90:LT|T|TR; S@180:LT|T|TR; W@270:LT|T|TR} is a “+” shaped 4-leg intersection with 3 inbound lanes for each leg. L is “allowing left turn”, T is “allowing through”, and R is “allowing right turn”. The direction has a value in [0, 359], with North as 0 and increasing clockwise. As a second example,  {N@0:L50|T|TR; E@90:LT|TR; S@180:L40|T|TR; W@270:LT|TR; SW@225:LT|TRx} can be a regular-shaped 5-leg intersection, with N-S dedicated left-turning lanes, and the SW leg as a one-way (probably an expressway ramp).
+
+5-legged out of yaohua:
+{N@30:LTR; NE@50:LT|TR; E@90:L|T|TR; S@220:L|LT|TR;W@270:L|LT|TR}
+22L22L
+{N@8^(0,+1):L60|T|TR; E@90:LT|TR; S@197^(0,+1):L60|T|TR;W@270:LT|TR}
+3LR23LR2
+{N@7^(+1,+1):LT|TR; E@90^(-1,+3):L60|T|T|T|R60; S@190^(+1,+1):LT|TR;W@270^(-1,+3):L60|T|T|T|R60}
+2L3S23O
+{N@335:->3; E@90^(+1,+1):T|TR; S@155^:LT|T|TRx; W@270^(+1,+1):L60|T|T}
+3333_skewed
+{N@0^(-5,+5):L|T|TR; E@90^(-1,+1):L|T|TR; S@190^(-5,+5):L|T|TR;W@270^(-1,+1):L|T|TR}

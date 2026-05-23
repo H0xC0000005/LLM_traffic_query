@@ -1,0 +1,56 @@
+import pandas as pd
+import numpy as np
+
+# from llmfe import evaluate
+# from llmfe import equation
+from energy_forecasting_adapter import score_candidate_from_llmfe
+
+
+@evaluate.run
+def evaluate(data: dict):
+    """Score one generated feature candidate.
+
+    The adapter performs temporal forecasting evaluation only on the development
+    period: days 0-279 for training and days 280-319 for inner evaluation.
+    The final future test period must not be present in the data passed here.
+    """
+    """ Evaluate the feature transformations on data observations."""
+    return score_candidate_from_llmfe(data, modify_features)
+
+
+@equation.evolve
+def modify_features(df_input: pd.DataFrame) -> pd.DataFrame:
+    """Create row-wise/on-timestamp supplementary features for energy forecasting.
+
+    Important constraints:
+    - Return a pandas DataFrame with exactly the same number of rows as df_input.
+    - Return only newly engineered feature columns; do not return original columns.
+    - Do not use meter_reading or any target values.
+    - Do not use future rows, rolling windows over the dataframe, groupby/global
+      aggregate statistics, ranks, shifts, expanding windows, or any transform
+      whose value for a row depends on other rows in df_input.
+    - Row-wise arithmetic, nonlinear transforms, safe ratios/interactions,
+      missingness indicators, and timestamp-derived features from the current
+      row are allowed.
+    - Do not return timestamp, building_id, site_id, pair_id, ts_idx, or other
+      identifier columns as features.
+      You must create df_output = pd.DataFrame(index=df_input.index).
+    - You must assign only new columns to df_output.
+    - You must return df_output.
+    - Do not modify df_input.
+    - Do not return df_input.
+    - Do not drop columns.
+    - Do not use columns outside the allowed list.
+    - Use safe division: numerator / (denominator.abs() + 1e-6).
+    - Replace inf/-inf with finite values.
+
+    Available feature descriptions:
+    [FEATURES]
+
+    Example rows:
+    [EXAMPLES]
+
+    [PREFIX]
+    [SUFFIX]
+    """
+    return pd.DataFrame(index=df_input.index)

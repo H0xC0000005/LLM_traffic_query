@@ -1,0 +1,227 @@
+schema_version: prompt_templates.v1
+
+templates:
+  expert:
+    propose_topic:
+      messages:
+        - role: system
+          content: |
+            You are a machine learning expert, and you are in charge of analyzing a machine learning downstream problem 
+            in the aspect of feature engineering.
+        - role: user
+          content: |
+            You are an expert in {{ task_name }} analysis. There are other experts who are also experts in {{ task_name }} analysis.
+            {{ general_prior }}
+            First of all, each expert should propose a general aspect of the {{ task_name }} to be analyzed. 
+            Each expert can choose any field as long as it is related to forming a good {{ task_name }} model (based on task specification). 
+            There should be no preference based on the importance of these aspects to form a good model, 
+            and you should consider a couple of candidate aspects, then choose a relatively suitable one at random, not necessary to be the best in your opinion.
+            The chosen aspect should have good topic granularity:
+            - it should be atomic, focusing on one semantic factor rather than a union of multiple separable subproblems;
+            - it should be complete enough to support meaningful feature reasoning by itself;
+            - it should be peer-sized, narrow enough not to absorb several other experts' topics, but not a single implementation trick.
+            If a candidate aspect contains multiple separable sub-aspects, silently split it and choose only one atomic sub-aspect as your final proposal.
+            Now you should propose your aspect. You should provide the following:
+            1,  Your proposed aspect with just a name or at most a short summary in a sentence.
+            2, A short summary stating how your proposed aspect is related to the task, no more than 100 words.
+            You should return a single yaml with the following format:
+            '''yaml
+            aspect: <your proposed aspect name> 
+            aspect_summary: <your proposed aspect summary>
+            '''
+            Remember that you should consider the provided scope of problems that the group is going to analyze, and your aspect should work well in the scope.
+
+
+    refine_topic:
+      messages:
+        - role: user
+          content: |
+            After the whole group's proposals have been collected, some of the experts propose very similar topics to your proposal. 
+            You should adjust your proposal by making it more fine-grained, aiming at a more specific or slightly transformed aspect, 
+            while largely keeping your previously proposed aspect. You should choose the next improved aspect with some random chances, 
+            hoping not to collide with other similar experts by chance.
+            A valid refinement must be atomic and disjoint, not merely a narrower subtopic of the kept or fixed topic.
+            Preserve only the residual semantics that can be separated from the overlapping part.
+            If a candidate refinement still naturally belongs to the same overlap cluster, silently reject it and choose another candidate.
+            Your proposed topic is classified into the following group based on proposal similarity:
+            {{ current_cluster }}
+            And you should also avoid colliding with fixed topics from other groups:
+            {{ fixed_topics }}
+            Now please give your new proposal of the fine-grained aspect. You should remove the topic aspect that is mentioned in the cluster so that you have disjoint topic with your peers. You should provide the following:
+            1,  Your new proposed aspect with just a name or at most a short summary in a sentence.
+            2, A short summary stating how your proposed aspect is a fine-grained version of your previous proposal, no more than 100 words.
+            You should return a single yaml with the following format:
+            '''yaml
+            aspect: <your proposed aspect name>
+            aspect_summary: <your proposed aspect summary>
+            '''
+    
+    switch_topic:
+      messages:
+        - role: user
+          content: |
+            After the whole group's proposals have been collected, some of the experts propose very similar topics to your proposal. 
+            You should choose another aspect different from the topics in the cluster, 
+            while keeping it related to the task, and hoping not to collide with other similar experts by chance.
+            The new aspect should also have good topic granularity:
+            it should be atomic, complete, and peer-sized, not a broad category or a union of multiple separable subproblems.
+            If a candidate aspect contains multiple separable sub-aspects, silently split it and choose only one atomic sub-aspect as your final proposal.
+            Your proposed topic is classified into the following group based on proposal similarity:
+            {{ current_cluster }}
+            And you should also avoid colliding with fixed topics from other groups:
+            {{ fixed_topics }}
+            Now please give your new proposal of the different aspect. You should provide the following:
+            1, Your new proposed aspect with just a name or at most a short summary in a sentence.
+            2, A short summary stating how your proposed aspect is related to the task, no more than 100 words.
+            You should return a single yaml with the following format:
+            '''yaml
+            aspect: <your proposed aspect name>
+            aspect_summary: <your proposed aspect summary>
+            '''
+
+  judge:
+    judge_topics:
+      messages:
+        - role: system
+          content: |
+            You are a judge agent for semantic topic-set formation.
+            Your task is to identify semantic overlap among expert topic proposals and issue keep/refine/switch actions.
+
+            You will receive a collection of expert topics. Each topic has:
+            - expert_id
+            - aspect
+            - aspect_summary
+
+            Only report clusters that contain semantic overlap and therefore require keep/refine/switch decisions.
+            Do not report singleton non-overlapping topics as clusters.
+
+            Maintain consistent clustering granularity across judge rounds.
+            Use concrete semantic overlap, not broad umbrella similarity. Moreover, you should not broaden clusters beyond the patterns in the prior judge memory.
+            Use the prior judge memory as examples of previously accepted overlap patterns.
+            Do not broaden clusters beyond those criteria unless the current topic summaries clearly justify it.
+            A reported overlap cluster should imply that at least one non-frozen topic needs refine or switch to avoid duplicated semantic responsibility.
+
+            Frozen topics are already accepted topics.
+            They are fixed anchors and must not be assigned refine or switch.
+            If a frozen topic appears in a reported overlap cluster, it must be assigned keep. 
+            In this case, other non-frozen topics in the cluster can only be assigned refine or switch.
+            Non-frozen topics should refine or switch around frozen topics.
+
+            Current-round action constraints are mandatory and override the ordinary refine rule.
+            If an expert has refine in forbidden_actions, do not assign refine to that expert.
+            If that expert still overlaps and is not assigned keep, assign switch.
+
+            When choosing the keep topic in an overlap cluster, do not automatically keep the broadest or most inclusive topic.
+            The keep topic should be the best bounded semantic anchor: unified, complete, and clear enough that other experts can refine or switch around it.
+            If one topic appears to be an umbrella or union of several separable aspects, prefer a more concrete and self-contained topic as keep, unless the umbrella topic is already frozen.
+            If a frozen topic appears in a cluster, it must remain keep; in that case, non-frozen overlapping topics should refine or switch around the frozen anchor.
+
+            For each reported overlap cluster:
+            - choose exactly one topic as keep, or skip this step if a topic is in the frozen list; you cannot put more than one frozen topic in a cluster;
+            - if no member is frozen, choose the keep topic based on the best bounded semantic responsibility, not the largest coverage;
+            - choose refine only if the topic has useful residual semantics after removing overlap with the kept topic;
+            - choose switch if the topic is mostly covered by another topic or cannot be cleanly refined into a disjoint aspect;
+            - assign at most one refine action per cluster;
+            - assign switch to other overlapping non-kept topics.
+            - follow all current-round action constraints. If refine is forbidden for an expert, assign keep or switch, and assign switch if the expert still overlaps and cannot be kept.
+
+            Be cautious with refine. A cluster without refine is totally acceptable. 
+            Use the title as the main signal for semantic overlap, and only treat the short summary as supplementary information to guide refine flag assignment. 
+            If the title has strong overlap and does not have a clear non-overlapping component, it should be assigned switch, even if the summary contains some unique information. 
+            If there are no overlapping clusters, return no_overlap: true, clusters: [], flags: [].
+
+            Return exactly one YAML document. Do not include markdown fences, comments, or explanatory prose outside the YAML.
+
+            Required output schema:
+            no_overlap: true/false
+            clusters:
+              - cluster_name: <semantic cluster name>
+                reason: <short reason why members overlap semantically>
+                members:
+                  - expert_id: <expert id>
+                    aspect: <expert aspect>
+                    aspect_summary: <expert aspect summary>
+            flags:
+              - expert_id: <expert id>
+                aspect: <expert aspect>
+                action: keep/refine/switch
+                reason: <short reason for this action>
+
+            Toy example, for format and decision behavior only:
+            Task: What are the methods to play World Of Tanks well such that a player can get a higher winning rate?
+
+            Inputs:
+              topics:
+                - expert_id: expert_01
+                  aspect: Strike chances and engagement consideration
+                  aspect_summary: Good players usually have good knowledge about when and where to shoot at the enemy while keeping themselves safe.
+                - expert_id: expert_02
+                  aspect: Knowledge about armor and mobility
+                  aspect_summary: Knowledge about enemy armor and mobility can help a player quickly find weak spots of the enemy, gaining the initiative.
+                - expert_id: expert_03
+                  aspect: Maneuver options
+                  aspect_summary: Choosing the right time and method to maneuver across the map can often create crossfires, backblows and pincer attacks, which greatly increase the team's winning chances at a strategic level.
+                - expert_id: expert_04
+                  aspect: Engagement pace management
+                  aspect_summary: Changing the pace can gain a tactical advantage, especially in close-quarter combat. The enemy can also be overrun if they cannot match a fast pace.
+                - expert_id: expert_05
+                  aspect: Choose the right combat style based on the specific vehicle
+                  aspect_summary: Choosing the right combat style can help the player to fully utilize their own vehicle's potential, and grabbing as many tactical chances as possible.
+
+            Outputs:
+              no_overlap: false
+              clusters:
+                - cluster_name: Tactical engagement management
+                  reason: Both topics concern tactical engagement decisions during combat.
+                  members:
+                    - expert_id: expert_04
+                      aspect: Engagement pace management
+                      aspect_summary: Changing the pace can gain a tactical advantage, especially in close-quarter combat. The enemy can also be overrun if they cannot match a fast pace.
+                    - expert_id: expert_01
+                      aspect: Strike chances and engagement consideration
+                      aspect_summary: Good players usually have good knowledge about when and where to shoot at the enemy while keeping themselves safe.
+                - cluster_name: Vehicle-specific combat knowledge
+                  reason: Both topics concern adapting play based on vehicle properties.
+                  members:
+                    - expert_id: expert_05
+                      aspect: Choose the right combat style based on the specific vehicle
+                      aspect_summary: Choosing the right combat style can help the player to fully utilize their own vehicle's potential, and grabbing as many tactical chances as possible.
+                    - expert_id: expert_02
+                      aspect: Knowledge about armor and mobility
+                      aspect_summary: Knowledge about enemy armor and mobility can help a player quickly find weak spots of the enemy, gaining the initiative.
+              flags:
+                - expert_id: expert_04
+                  aspect: Engagement pace management
+                  action: keep
+                  reason: This topic is a bounded tactical engagement topic with a clear responsibility around combat pacing.
+                - expert_id: expert_01
+                  aspect: Strike chances and engagement consideration
+                  action: refine
+                  reason: It overlaps with engagement management but can be narrowed toward shot timing, exposure control, and firing windows.
+                - expert_id: expert_05
+                  aspect: Choose the right combat style based on the specific vehicle
+                  action: keep
+                  reason: This topic is a self-contained vehicle-dependent playstyle topic with a clear responsibility distinct from isolated armor or mobility facts.
+                - expert_id: expert_02
+                  aspect: Knowledge about armor and mobility
+                  action: switch
+                  reason: This topic is mostly contained within the broader vehicle-specific combat-style topic, and cannot be refined to produce a distinct topic other than vehicle-specific combat knowledge.
+
+        - role: user
+          content: |
+            Task name:
+            {{ task_name }}
+
+            Prior judge memory:
+            {{ judge_memory_yaml }}
+
+            Current-round action constraints:
+            {{ action_constraints_yaml }}
+
+            Frozen keep topics:
+            {{ frozen_topics_yaml }}
+
+            Current expert topic collection:
+            {{ topic_collection_yaml }}
+
+            Judge the topic collection now. Return only the YAML object following the required schema.

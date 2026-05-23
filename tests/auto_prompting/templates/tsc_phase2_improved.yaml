@@ -1,0 +1,126 @@
+schema_version: task_variables.v1
+task_id: tsc
+variables:
+  task_name: traffic signal control (TSC)
+  general_prior: |
+    The task is to produce effective state representations of the intersection to enhance the performance of a good reinforcement learning model aiming at good phase control for an isolated intersection. 
+    Basic encodings such as queue length, waiting time, and phase serve conditions are provided.
+    There will be no pedestrians, and only vehicles should be considered. 
+    Incoming flow is free flow.
+    You are working together with peers to analyze specific factors of an isolated intersection to produce effective state representations.
+  scenario_prior: |
+    The scenario is always right-hand side driving.
+    The intersection always contains a single group of traffic lights. Composite intersections, roundabouts, and multiple-signal-group intersections are outside the scope.
+    The intersection is always an urban intersection with moderate traffic.
+    There will be a majority of cars, very few trucks, few public vehicles such as buses or garbage trucks, very few active emergency vehicles, and some motorists.
+    Active emergency vehicles have the highest priority, while the rest have the same lower priority.
+
+    The intersection is represented with a compact encoding that records leg shape, bearing, lateral displacement, and lane permissions.
+    The format is:
+    { ( <leg> := <leg_name> [@ <bearing_deg>] [^ <offset_pair>] :(->[0-9])? (<lane_direction> (| <lane_direction>)* x?)? ; )* }
+    <offset_pair> := ( <inbound offset> [ , <outbound offset> ] )
+
+    Lane directions use L for left turn, T for through, and R for right turn.
+    If a number is attached to a lane, such as L50, it means that lane is a dedicated turning lane starting from 50 meters from the intersection.
+    The outgoing direction of each leg is assumed to have the same lane configuration as the incoming direction unless x is provided, which denotes no outbound lanes.
+    If the direction is provided as an arrow followed by a digit, such as ->3, that leg is outbound only with the specified number of lanes.
+    For each leg, an optional offset pair is written as ^(din[,dout]).
+    din is the signed lateral offset in meters of the inbound carriageway centerline, and dout is the corresponding offset for the outbound carriageway.
+    The sign is defined in the local travel frame: positive means to the driver's left, and negative means to the driver's right.
+    If only one offset value is provided, it applies to both inbound and outbound.
+    If the leg has no outbound lanes, dout may be omitted and is ignored.
+    If the offset pair is absent, it defaults to (0,0).
+
+    The traffic simulation is run with SUMO.
+    If possible, use libsumo. If TraCI-style code is needed, use the import pattern "import libsumo as traci" whenever possible.
+    Query only the current timestep whenever possible, since past history is not explicitly stored.
+    You may use an external cache if history is needed, but you must explicitly document the cache usage.
+  scenario_instance: |
+    The group is analyzing the following intersection:
+    "{N@8^(0,+1):L60|T|TR; E@90:LT|TR; S@197^(0,+1):L60|T|TR;W@270:LT|TR}"
+
+    There are no pedestrians in this intersection.
+  feature_plan_prior: |-
+    The feature plan should explain how the expert's final semantic topic can be applied to the given scenario.
+    The proposed plan should be either highly correlated with signal-control performance, or have an important logical relationship to traffic signal control.
+    The expert should actively seek how its responsible topic can be operationalized in the given scenario.
+    If retrieval tools, external references, literature snippets, reports, or tool documentation are available, the expert should use them to support the scenario-specific reasoning and summarize their contribution.
+    If no external reference is available, the expert should rely on the task prior and scenario prior, and explicitly state that no external reference was used.
+
+    The plan may assume access to data that is observable in the environment or dataset.
+    For TSC, this includes but is not limited to intersection layout, lane permissions, vehicle position, speed, lane, route or turn intent, waiting time, traffic-light state, and quantities computable or cacheable from these observations.
+    The plan should not rely on arbitrary unavailable information that cannot be logically observed, computed, cached, or approximated from the environment or dataset.
+
+    The plan does not need to be universal to all scenarios. It may be specifically useful for the given intersection.
+    The plan should be specific enough to model one scenario subset or one clean semantic quantity.
+    Aspects beyond the intersection may be used if they contribute to forming a good signal plan for this specific intersection and can be grounded in observable or dataset-available quantities.
+    The planned feature should be quantifiable over time frames of the intersection traffic.
+    The planned feature should be understandable and usable by downstream machine learning models.
+  expert_code_synthesis_prior: |-
+    Translate the scenario-specific feature plan into an expert-level Python feature function or code piece.
+    The function should focus on the expert's own feature family and should not attempt to assemble all experts' features.
+    The assembler will later combine all expert code pieces into one monolithic feature engineering function.
+
+    Prefer logical resolution of variables into quantities that can be observed from the environment or dataset.
+    For TSC, observable or dataset-available quantities include but are not limited to intersection layout, vehicle position, speed, lane, route or turn intent, traffic-light state, queue length, waiting time, and estimated flow pattern.
+    If a quantity can be resolved from the intersection encoding, explicitly resolve it in code when reasonable.
+    If a quantity should be obtained through SUMO/libsumo/TraCI APIs, it is acceptable to describe the logical variable and leave the exact API call or integration detail for the assembler, as long as the variable source and semantics are unambiguous.
+    If a hyperparameter cannot be computed or retrieved from simulation, provide a good default value.
+
+    The output should be one of: a numerical value, a categorical value, or a compact vector-like collection of numerical/categorical values.
+    The output should represent one coherent feature family, not multiple unrelated variables with different semantics.
+    Normalize outputs whenever possible. Ideal normalization is [0,1], but comparable ML-friendly scales are acceptable.
+    Avoid features that are almost always zero, extremely sparse, or confusing for downstream ML models.
+    Procedural code is preferred over object-oriented code.
+    The expert code does not need to be the final monolithic implementation, but it must preserve a clear algorithm and document unresolved integration items for the assembler.
+  expert_feature_function_contract: |
+    Produce a Python function or code piece following this style:
+
+    def <feature_name_as_function_name>(<required_parameters_with_type_annotations>) -> <output_type>:
+        """
+        <summary of algorithm, no more than 50 words>
+        <I/O or parameter documentation>
+        <return value structure and semantic meaning>
+        <cache usage if any>
+        """
+        <body>
+
+    The returned YAML field feature_code must contain the code as a block string.
+    The code may be locally scoped to the expert's feature, but it should be clear enough for the assembler to integrate.
+    If some details require assembler-level integration, document them in assembler_notes rather than hiding them.
+  assembler_prior: |-
+    You are assembling expert-generated feature functions for Traffic Signal Control on a single isolated intersection.
+    The final code should be Python and should use libsumo whenever possible.
+    If expert code uses TraCI, prefer the compatibility pattern "import libsumo as traci" to minimize changes.
+    The final function should assume access to a full simulation session and the traffic light system id.
+    It may access simulation attributes such as traffic light state, lanes, vehicles, positions, speeds, routes, waiting times, and network geometry when available.
+    Use the provided scenario prior and scenario instance directly to avoid misinterpreting the scenario assumptions or intersection encoding.
+
+    The cache reset is managed by the training loop.
+    Do not reset the cache inside the function.
+    Do not use internal hidden cache state; only use the external cache argument.
+    Cache keys should be semantically labeled to avoid clashes with other contents.
+  assembler_function_contract: |-
+    Generate a single combined Python function with this signature style:
+
+    def tsc_isolated_intersection_feature_vector(
+        tls_id: str,
+        *,
+        cache: dict | None = None,
+        <required_parameters_with_defaults_and_type_annotations>,
+        **kwargs
+    ) -> <vector_like_output_type>:
+        """
+        <summary of algorithm, no more than 100 words>
+        <I/O and parameter documentation>
+        <feature vector layout and expert-to-feature mapping summary>
+        <cache usage documentation>
+        """
+        <body>
+
+    The return value must be vector-like and directly usable as downstream ML features after simple type conversion.
+    Do not return a dict or key-value structure from the final function.
+    If an expert code piece produces a non-vector quantity, convert it into numeric vector dimensions.
+    The final YAML response must include expert_feature_mapping with inclusive start and exclusive end indices for each expert's feature slice.
+    The mapping must be structured enough to route later statistical feedback to the correct expert and feature group.
+  external_reference_context_yaml: '[]'

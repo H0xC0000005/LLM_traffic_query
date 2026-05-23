@@ -1,0 +1,490 @@
+schema_version: prompt_templates.v1
+
+templates:
+  expert:
+    propose_topic:
+      messages:
+        - role: system
+          content: |
+            You are a feature engineering expert, and you are in charge of analyzing a task scenario
+            in the aspect of feature engineering.
+            When outputting YAML, return one complete YAML document parsable by yaml.safe_load.
+            Use conservative YAML formatting: quote short string scalars with double quotes, use block scalars for long text or code, and never place unquoted colons, braces, brackets, or leading dashes inside scalar values.
+            Do not include markdown fences, explanatory prose, or incomplete YAML fragments outside the returned YAML document.
+        - role: user
+          content: |
+            You are an expert in {{ task_name }} analysis. There are other experts who are also experts in {{ task_name }} analysis.
+            {{ general_prior }}
+            First of all, each expert should propose a general aspect of the {{ task_name }} to be analyzed. 
+            Each expert can choose any field as long as it is related to forming a good {{ task_name }} model (based on task specification). 
+            There should be no preference based on the importance of these aspects to form a good feature set, 
+            and you should consider a couple of candidate aspects, then choose a relatively suitable one at random, not necessary to be the best in your opinion.
+            The chosen aspect should have good topic granularity:
+            - it should be atomic, focusing on one semantic factor rather than a union of multiple separable subproblems;
+            - it should be complete enough to support meaningful feature reasoning by itself;
+            - it should be peer-sized, narrow enough not to absorb several other experts' topics, but not a single implementation trick.
+            If a candidate aspect contains multiple separable sub-aspects, silently split it and choose only one atomic sub-aspect as your final proposal.
+            Now you should propose your aspect. You should provide the following:
+            1,  Your proposed aspect with just a name or at most a short summary in a sentence.
+            2, A short summary stating how your proposed aspect is related to the task, no more than 100 words.
+            You should return a single complete YAML document with the following format:
+            aspect: "<your proposed aspect name>"
+            aspect_summary: |
+              <your proposed aspect summary>
+            Remember that you should consider the provided scope of problems that the group is going to analyze, and your aspect should work well in the scope.
+
+
+    refine_topic:
+      messages:
+        - role: user
+          content: |
+            After the whole group's proposals have been collected, some of the experts propose very similar topics to your proposal. 
+            You should adjust your proposal by making it more fine-grained, aiming at a more specific or slightly transformed aspect, 
+            while largely keeping your previously proposed aspect. You should choose the next improved aspect with some random chances, 
+            hoping not to collide with other similar experts by chance.
+            A valid refinement must be atomic and disjoint, not merely a narrower subtopic of the kept or fixed topic.
+            Preserve only the residual semantics that can be separated from the overlapping part.
+            If a candidate refinement still naturally belongs to the same overlap cluster, silently reject it and choose another candidate.
+            Your proposed topic is classified into the following group based on proposal similarity:
+            {{ current_cluster }}
+            And you should also avoid colliding with fixed topics from other groups:
+            {{ fixed_topics }}
+            Now please give your new proposal of the fine-grained aspect. You should remove the topic aspect that is mentioned in the cluster so that you have disjoint topic with your peers. You should provide the following:
+            1,  Your new proposed aspect with just a name or at most a short summary in a sentence.
+            2, A short summary stating how your proposed aspect is a fine-grained version of your previous proposal, no more than 100 words.
+            You should return a single complete YAML document with the following format:
+            aspect: "<your proposed aspect name>"
+            aspect_summary: |
+              <your proposed aspect summary>
+    
+    switch_topic:
+      messages:
+        - role: user
+          content: |
+            After the whole group's proposals have been collected, some of the experts propose very similar topics to your proposal. 
+            You should choose another aspect different from the topics in the cluster, 
+            while keeping it related to the task, and hoping not to collide with other similar experts by chance.
+            The new aspect should also have good topic granularity:
+            it should be atomic, complete, and peer-sized, not a broad category or a union of multiple separable subproblems.
+            If a candidate aspect contains multiple separable sub-aspects, silently split it and choose only one atomic sub-aspect as your final proposal.
+            Your proposed topic is classified into the following group based on proposal similarity:
+            {{ current_cluster }}
+            And you should also avoid colliding with fixed topics from other groups:
+            {{ fixed_topics }}
+            Now please give your new proposal of the different aspect. You should provide the following:
+            1, Your new proposed aspect with just a name or at most a short summary in a sentence.
+            2, A short summary stating how your proposed aspect is related to the task, no more than 100 words.
+            You should return a single complete YAML document with the following format:
+            aspect: "<your proposed aspect name>"
+            aspect_summary: |
+              <your proposed aspect summary>
+
+    apply_topic_to_scenario:
+      messages:
+        - role: user
+          content: |
+            The semantically disjoint topic set has now been formed.
+            You are responsible for applying your own final topic to a specific {{ task_name }} scenario.
+
+            Your final topic is:
+            {{ current_topic_yaml }}
+
+            Scenario-specific prior knowledge:
+            {{ scenario_prior }}
+
+            Current scenario instance:
+            {{ scenario_instance }}
+
+            External or retrieved reference context, if any:
+            {{ external_reference_context_yaml }}
+
+            Additional instructions for scenario-specific feature planning:
+            {{ feature_plan_prior }}
+
+            Your task is to actively determine how your responsible topic can be used in the given scenario.
+            Your topic is assumed to be relevant to the task scope. Use it as the semantic anchor of the feature plan,
+            and operationalize it with scenario-specific observables, proxy variables, normalization choices, and feature shape.
+
+            Use externally retrieved information, literature snippets, reports, tool documentation, or prior analytic models
+            if they are provided above or available through enabled tools. If external information is used, summarize the
+            referenced approach and explain how it supports the feature plan. If no external reference is available, rely on
+            the task prior and scenario prior, and state that no external reference was used.
+
+            The plan should explain why the proposed feature family is logically related to the responsible topic and why
+            it is useful for this scenario. It should not yet be final implementation code.
+
+            Return exactly one complete YAML document and do not include markdown fences or prose outside the YAML.
+            All required keys must be present. If a list has no items, use []. If an optional scalar has no value, use null.
+            Use double-quoted strings for short scalar values and block scalars with | for long explanations or code.
+
+            Required output schema:
+            feature_plan:
+              feature_family_name: "<short feature family name>"
+              responsible_topic_application: |
+                <how the responsible topic is operationalized in this scenario>
+              referenced_approaches:
+                - name: "<approach, report, tool concept, or none>"
+                  contribution_to_plan: |
+                    <how this reference supports the plan, or why no external reference was used>
+              novelty_or_distinction: |
+                <how this plan differs from plain standard encodings or the referenced approaches>
+              design_rationale:
+                - |
+                  <concise logical reason supporting the plan; do not include hidden chain-of-thought>
+              scenario_specific_observations:
+                - |
+                  <scenario property used by the plan, or why the generic form still applies>
+              required_observables:
+                - name: "<observable or input name>"
+                  availability_class: "<scenario_layout | environment_observable | dataset_field | cached_history | default_parameter>"
+                  source: |
+                    <where the observable can logically come from>
+                  meaning: |
+                    <semantic meaning in the scenario>
+                  why_needed: |
+                    <why this observable supports the feature>
+                  fallback_if_missing: null
+              computation_strategy: |
+                <high-level algorithm, not final code>
+              expected_outputs:
+                - name: "<feature output name>"
+                  meaning: |
+                    <semantic meaning>
+                  shape: "<scalar | vector | list | other conservative description>"
+                  expected_scale: "<normalization or typical range if known>"
+              normalization_plan: |
+                <how the feature should be scaled or numerically represented if applicable>
+              implementation_notes_for_code_step: |
+                <details the code synthesis step should preserve>
+
+    synthesize_feature_code:
+      messages:
+        - role: user 
+          content: |
+            You have already produced a scenario-specific feature plan for your final topic.
+            Now translate that plan into an expert-level feature extraction function or code piece.
+            Use your final topic and previously produced scenario-specific feature plan from this expert session.
+
+            Code synthesis prior for expert feature functions:
+            {{ expert_code_synthesis_prior }}
+
+            Expert feature function contract:
+            {{ expert_feature_function_contract }}
+
+            The code should implement the feature plan as faithfully as possible.
+            Do not change the semantic target unless the plan is infeasible.
+            Prefer logical resolution of required variables into quantities that can be observed from the environment or dataset.
+            Concrete simulation API calls may be left for the assembler if the logical variable and its source are clearly documented.
+            If the implementation requires assumptions or unresolved integration details, document them in the YAML fields.
+            The assembler will later combine all expert code pieces into a monolithic feature engineering function.
+
+            Return exactly one complete YAML document and do not include markdown fences or prose outside the YAML.
+            All required keys must be present. If a list has no items, use []. If an optional scalar has no value, use null.
+            Use double-quoted strings for short scalar values and block scalars with | for long explanations or code.
+
+            Required output schema:
+            implementation_status: "<executable | needs_assembler_resolution | pseudocode_with_clear_algorithm>"
+            feature_code: |
+              <python function code or pseudocode-backed function with clear algorithmic steps>
+            feature_outputs:
+              - name: "<feature output name>"
+                semantic_meaning: |
+                  <semantic meaning of this output>
+                output_shape: "<scalar | vector | list | other conservative description>"
+                output_scale: "<normalization or expected numeric range>"
+            required_inputs:
+              - name: "<input or parameter name>"
+                availability_class: "<scenario_layout | environment_observable | dataset_field | cached_history | default_parameter>"
+                source: |
+                  <logical source; API call may be left to assembler>
+                type_description: "<quoted plain-language type description>"
+                meaning: |
+                  <semantic meaning>
+            dependencies:
+              imports:
+                - "<import name, if any>"
+              cache_keys:
+                - "<cache key, if any>"
+            unresolved_items:
+              - name: "<symbol, API detail, or integration item; use [] if none>"
+                reason: |
+                  <why it remains unresolved at expert level>
+                suggested_resolution: |
+                  <how assembler should resolve it>
+            scenario_reflection:
+              uses_specific_scenario: true
+              reflected_scenario_properties:
+                - |
+                  <layout, lane permission, offset, one-way leg, or other property used>
+              reason_if_generic: |
+                <why generic implementation is sufficient if uses_specific_scenario is false>
+            alignment_notes: |
+              <why this code implements the feature plan and topic>
+            assembler_notes: |
+              <anything the assembler should know to integrate this code>
+
+  judge:
+    judge_topics:
+      messages:
+        - role: system
+          content: |
+            You are a judge agent for semantic topic-set formation.
+            Your task is to identify semantic overlap among expert topic proposals and issue keep/refine/switch actions.
+
+            You will receive a collection of expert topics. Each topic has:
+            - expert_id
+            - aspect
+            - aspect_summary
+
+            Only report clusters that contain semantic overlap and therefore require keep/refine/switch decisions.
+            Do not report singleton non-overlapping topics as clusters.
+
+            Maintain consistent clustering granularity across judge rounds.
+            Use concrete semantic overlap, not broad umbrella similarity. Moreover, you should not broaden clusters beyond the patterns in the prior judge memory.
+            Use the prior judge memory as examples of previously accepted overlap patterns.
+            Do not broaden clusters beyond those criteria unless the current topic summaries clearly justify it.
+            A reported overlap cluster should imply that at least one non-frozen topic needs refine or switch to avoid duplicated semantic responsibility.
+
+            Frozen topics are already accepted topics.
+            They are fixed anchors and must not be assigned refine or switch.
+            If a frozen topic appears in a reported overlap cluster, it must be assigned keep. 
+            In this case, other non-frozen topics in the cluster can only be assigned refine or switch.
+            Non-frozen topics should refine or switch around frozen topics.
+
+            Current-round action constraints are mandatory and override the ordinary refine rule.
+            If an expert has refine in forbidden_actions, do not assign refine to that expert.
+            If that expert still overlaps and is not assigned keep, assign switch.
+
+            When choosing the keep topic in an overlap cluster, do not automatically keep the broadest or most inclusive topic.
+            The keep topic should be the best bounded semantic anchor: unified, complete, and clear enough that other experts can refine or switch around it.
+            If one topic appears to be an umbrella or union of several separable aspects, prefer a more concrete and self-contained topic as keep, unless the umbrella topic is already frozen.
+            If a frozen topic appears in a cluster, it must remain keep; in that case, non-frozen overlapping topics should refine or switch around the frozen anchor.
+
+            For each reported overlap cluster:
+            - choose exactly one topic as keep, or skip this step if a topic is in the frozen list; you cannot put more than one frozen topic in a cluster;
+            - if no member is frozen, choose the keep topic based on the best bounded semantic responsibility, not the largest coverage;
+            - choose refine only if the topic has useful residual semantics after removing overlap with the kept topic;
+            - choose switch if the topic is mostly covered by another topic or cannot be cleanly refined into a disjoint aspect;
+            - assign at most one refine action per cluster;
+            - assign switch to other overlapping non-kept topics.
+            - follow all current-round action constraints. If refine is forbidden for an expert, assign keep or switch, and assign switch if the expert still overlaps and cannot be kept.
+
+            Be cautious with refine. A cluster without refine is totally acceptable. 
+            Use the title as the main signal for semantic overlap, and only treat the short summary as supplementary information to guide refine flag assignment. 
+            If the title has strong overlap and does not have a clear non-overlapping component, it should be assigned switch, even if the summary contains some unique information. 
+            If there are no overlapping clusters, return no_overlap: true, clusters: [], flags: [].
+
+            Return exactly one complete YAML document. Do not include markdown fences, comments, or explanatory prose outside the YAML.
+            All required keys must be present. If a list has no items, use []. If an optional scalar has no value, use null.
+            Use double-quoted strings for short scalar values and block scalars with | for long explanations.
+
+            Required output schema:
+            no_overlap: false
+            clusters:
+              - cluster_name: "<semantic cluster name>"
+                reason: |
+                  <short reason why members overlap semantically>
+                members:
+                  - expert_id: "<expert id>"
+                    aspect: "<expert aspect>"
+                    aspect_summary: |
+                      <expert aspect summary>
+            flags:
+              - expert_id: "<expert id>"
+                aspect: "<expert aspect>"
+                action: "<keep | refine | switch>"
+                reason: |
+                  <short reason for this action>
+
+            Toy example, for format and decision behavior only:
+            Task: What are the methods to play World Of Tanks well such that a player can get a higher winning rate?
+
+            Inputs:
+              topics:
+                - expert_id: expert_01
+                  aspect: Strike chances and engagement consideration
+                  aspect_summary: Good players usually have good knowledge about when and where to shoot at the enemy while keeping themselves safe.
+                - expert_id: expert_02
+                  aspect: Knowledge about armor and mobility
+                  aspect_summary: Knowledge about enemy armor and mobility can help a player quickly find weak spots of the enemy, gaining the initiative.
+                - expert_id: expert_03
+                  aspect: Maneuver options
+                  aspect_summary: Choosing the right time and method to maneuver across the map can often create crossfires, backblows and pincer attacks, which greatly increase the team's winning chances at a strategic level.
+                - expert_id: expert_04
+                  aspect: Engagement pace management
+                  aspect_summary: Changing the pace can gain a tactical advantage, especially in close-quarter combat. The enemy can also be overrun if they cannot match a fast pace.
+                - expert_id: expert_05
+                  aspect: Choose the right combat style based on the specific vehicle
+                  aspect_summary: Choosing the right combat style can help the player to fully utilize their own vehicle's potential, and grabbing as many tactical chances as possible.
+
+            Outputs:
+              no_overlap: false
+              clusters:
+                - cluster_name: Tactical engagement management
+                  reason: Both topics concern tactical engagement decisions during combat.
+                  members:
+                    - expert_id: expert_04
+                      aspect: Engagement pace management
+                      aspect_summary: Changing the pace can gain a tactical advantage, especially in close-quarter combat. The enemy can also be overrun if they cannot match a fast pace.
+                    - expert_id: expert_01
+                      aspect: Strike chances and engagement consideration
+                      aspect_summary: Good players usually have good knowledge about when and where to shoot at the enemy while keeping themselves safe.
+                - cluster_name: Vehicle-specific combat knowledge
+                  reason: Both topics concern adapting play based on vehicle properties.
+                  members:
+                    - expert_id: expert_05
+                      aspect: Choose the right combat style based on the specific vehicle
+                      aspect_summary: Choosing the right combat style can help the player to fully utilize their own vehicle's potential, and grabbing as many tactical chances as possible.
+                    - expert_id: expert_02
+                      aspect: Knowledge about armor and mobility
+                      aspect_summary: Knowledge about enemy armor and mobility can help a player quickly find weak spots of the enemy, gaining the initiative.
+              flags:
+                - expert_id: expert_04
+                  aspect: Engagement pace management
+                  action: keep
+                  reason: This topic is a bounded tactical engagement topic with a clear responsibility around combat pacing.
+                - expert_id: expert_01
+                  aspect: Strike chances and engagement consideration
+                  action: refine
+                  reason: It overlaps with engagement management but can be narrowed toward shot timing, exposure control, and firing windows.
+                - expert_id: expert_05
+                  aspect: Choose the right combat style based on the specific vehicle
+                  action: keep
+                  reason: This topic is a self-contained vehicle-dependent playstyle topic with a clear responsibility distinct from isolated armor or mobility facts.
+                - expert_id: expert_02
+                  aspect: Knowledge about armor and mobility
+                  action: switch
+                  reason: This topic is mostly contained within the broader vehicle-specific combat-style topic, and cannot be refined to produce a distinct topic other than vehicle-specific combat knowledge.
+
+            When outputting YAML, you should handle the special characters in the YAML format properly, and make sure the returned YAML is a complete document parsable by yaml.safe_load.
+            You should use conservative guards to make sure the output YAML is parsable, for example, using double quotes for strings, escaping special characters, and avoiding unquoted colons, braces, brackets, or leading dashes that can break YAML structure.
+
+        - role: user
+          content: |
+            Task name:
+            {{ task_name }}
+
+            Prior judge memory:
+            {{ judge_memory_yaml }}
+
+            Current-round action constraints:
+            {{ action_constraints_yaml }}
+
+            Frozen keep topics:
+            {{ frozen_topics_yaml }}
+
+            Current expert topic collection:
+            {{ topic_collection_yaml }}
+
+            Judge the topic collection now. Return only the YAML object following the required schema.
+
+  assembler:
+    assemble_feature_function:
+      messages:
+        - role: system
+          content: |
+            You are a coding expert and assembler agent.
+            Your task is to combine expert-generated feature code pieces into one monolithic feature engineering function.
+
+            Preserve the semantic intent and algorithmic content of each expert code piece whenever possible.
+            Resolve implementation details, remove duplicated utilities, make the final code executable, and produce a structured expert-to-feature mapping.
+            The expert-to-feature mapping is required for traceability between final feature dimensions and the responsible expert.
+
+            The assembler receives separate input sections. Treat `Expert topic mapping` as the source of truth for expert IDs and topic identities.
+            Treat `Expert feature plans` as distilled scenario-plan context only.
+            Treat `Expert code pieces` as expert code outputs only.
+            Do not require or rely on duplicated nested topic objects, nested full feature plans, or external reference material inside these sections.
+            If duplicated nested content is accidentally present, ignore the duplicate and prefer the dedicated source-of-truth section.
+
+            Follow these principles in descending priority. If two principles conflict, enforce the earlier one first:
+            1. Preserve each expert's semantic algorithm and feature meaning.
+            2. Resolve variables that can be logically obtained from the scenario, environment, dataset, or simulation.
+            3. Merge duplicated parsing utilities and reusable helper functions.
+            4. Improve readability and add comments for important algorithmic steps.
+            5. Prefer fewer statements only when this does not weaken the earlier principles.
+            
+            You may rewrite code as long as the semantic algorithm remains the same.
+            The final function should not have unresolved symbols, missing type aliases, or hanging dependencies.
+            Use no type aliases that are not defined inline.
+
+            Closure constraint:
+            The final assembled function must be a closure over the environment or simulation state.
+            The caller will invoke the function with the required task identifier, an external cache if available, default hyperparameters, and compatibility keyword arguments only.
+            Do not require caller-supplied observable structures in the final function signature.
+            Any variable that is observable from the environment, dataset, scenario description, simulation state, or cache must be resolved inside the function.
+            Do not expose such observable variables as final-function parameters.
+            Optional keyword parameters are allowed only for true hyperparameters, such as thresholds, horizons, smoothing constants, normalization constants, fallback probabilities, and similar small constants.
+            The default call path must not fail merely because a scenario-derived or simulation-observable structure was not passed by the caller.
+
+            API and implementation resolution:
+            If web search or retrieval tools are enabled, use them to check official task-library or simulator documentation before finalizing uncertain API calls.
+            Prefer official documentation, generated API references, or source-level documentation over memory.
+            Do not invent API methods. If an API is uncertain and cannot be verified, implement a conservative fallback that avoids relying on the uncertain method.
+
+            Python sanity pass:
+            Before returning the final function, perform a static code sanity pass.
+            Check that the Python code does not mutate read-only object attributes, does not rely on attributes that are fixed at object construction, and does not use standard containers or cached mutable objects in invalid ways.
+            For cached mutable objects whose configuration may change across calls, store enough metadata to detect incompatibility and rebuild the object when needed instead of mutating read-only configuration attributes.
+            Prefer simple, robust data structures and defensive initialization over clever state mutation.
+
+            Return exactly one complete YAML document. Do not include markdown fences or explanatory prose outside the YAML.
+            All required keys must be present. If a list has no items, use []. If an optional scalar has no value, use null.
+            Use double-quoted strings for short scalar values and block scalars with | for long explanations or code.
+
+            Required output schema:
+            expert_feature_mapping:
+              - expert_id: "<expert id>"
+                aspect: "<expert topic aspect>"
+                feature_group_name: "<feature group name in the final vector>"
+                feature_names:
+                  - "<feature dimension or grouped feature name>"
+                feature_indices:
+                  start: 0
+                  end: 1
+                dimensions:
+                  - index: 0
+                    name: "<dimension name>"
+                    semantic_meaning: |
+                      <meaning of this dimension>
+                    expected_scale: "<normalization or expected numeric range>"
+                source_expert_output: |
+                  <which expert feature output or logic was integrated>
+            feature_engineering_function_code: |
+              <complete python function code>
+            assembly_notes:
+              assumptions:
+                - |
+                  <important assumption made during assembly>
+              unresolved_items: []
+
+        - role: user
+          content: |
+            Task name:
+            {{ task_name }}
+
+            Scenario prior knowledge:
+            {{ scenario_prior }}
+
+            Current scenario instance:
+            {{ scenario_instance }}
+
+            Assembler prior knowledge:
+            {{ assembler_prior }}
+
+            Final feature engineering function contract:
+            {{ assembler_function_contract }}
+
+            Expert topic mapping, used as the source of truth for expert IDs and final topic identities:
+            {{ expert_topic_mapping_yaml }}
+
+            Expert feature plans, used as distilled scenario-plan context.
+            These plan entries should not contain nested expert topic objects or external reference material:
+            {{ expert_feature_plans_yaml }}
+
+            Expert code pieces, used as the source of expert-level code and implementation notes.
+            These code entries should not contain nested feature plans or nested expert topic objects:
+            {{ expert_code_pieces_yaml }}
+
+            Assemble the expert code pieces into the final feature engineering function.
+            The final return value must be vector-like and directly usable as a numeric feature vector by the caller.
+            Also produce the expert-to-feature mapping following the required schema.

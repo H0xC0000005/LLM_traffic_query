@@ -33,52 +33,6 @@ essential data structures
 """
 
 
-@dataclass(slots=True)
-class TSCSceneSnapshot:
-    """
-    Portable per-frame scene snapshot for one isolated intersection.
-
-    The snapshot preserves canonical incoming-lane order via ``lane_ids`` and stores
-    semantically named feature arrays in ``per_lane`` and ``global_stats``.
-    Arrays in ``per_lane`` must all have length ``len(lane_ids)``.
-
-    Notes
-    -----
-    - ``per_lane`` is intended for reusable lane-aligned quantities such as normalized
-      queue/count/speed/wait and lane green flags.
-    - ``global_stats`` is intended for reusable intersection-level quantities, such as
-      the active TLS program ID.
-    - ``extras`` is a namespace for non-portable or encoder-specific information. The
-      current encoder uses ``extras["signal_context"]`` to preserve the exact old
-      phase one-hot and major-green starvation features without forcing them into the
-      base portable schema.
-    """
-
-    tls_id: str
-    sim_time: float
-    lane_ids: tuple[str, ...]
-    per_lane: dict[str, np.ndarray]
-    global_stats: dict[str, Any] = field(default_factory=dict)
-    extras: dict[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        n = len(self.lane_ids)
-        normed: dict[str, np.ndarray] = {}
-        for key, value in self.per_lane.items():
-            arr = np.asarray(value, dtype=np.float32).reshape(-1)
-            if arr.shape[0] != n:
-                raise ValueError(f"per_lane[{key!r}] has length {arr.shape[0]} but expected {n}")
-            normed[key] = arr
-        self.per_lane = normed
-
-    @property
-    def num_lanes(self) -> int:
-        return len(self.lane_ids)
-
-    def lane_feature(self, key: str) -> np.ndarray:
-        return self.per_lane[key]
-
-
 class RunningFeatureStats:
     def __init__(
         self,
@@ -186,7 +140,9 @@ class TLSControllerState:
     pending_epsilon: float = 0.0
     in_control_when_pending: bool = False
     next_target_update_time: float = 0.0
-    pending_segments: Deque[Tuple[int, float]] = field(default_factory=deque)  # (phase_idx, duration_s)
+    pending_segments: Deque[Tuple[int, float]] = field(
+        default_factory=deque
+    )  # (phase_idx, duration_s)
     segment_end_time: float = 0.0  # when current segment ends
     # log_step: int = 0
 
@@ -220,7 +176,9 @@ def get_attr_np(obj: Any, names: Sequence[str]) -> Optional[np.ndarray]:
     return None
 
 
-def split_core_sem_from_states(states: np.ndarray, sem_dim: int) -> Tuple[np.ndarray, np.ndarray]:
+def split_core_sem_from_states(
+    states: np.ndarray, sem_dim: int
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     Split combined state [core, expert] -> (core, expert).
     Returns empty arrays if shape is invalid.
@@ -397,7 +355,9 @@ class RunningExpertAdvPearson:
             self.sum_xy[j] += float(np.sum(xv * yv))
 
     def corr(self) -> np.ndarray:
-        return _safe_pearson_from_sums(self.n, self.sum_x, self.sum_x2, self.sum_y, self.sum_y2, self.sum_xy)
+        return _safe_pearson_from_sums(
+            self.n, self.sum_x, self.sum_x2, self.sum_y, self.sum_y2, self.sum_xy
+        )
 
     def finalize(self) -> Dict[str, Any]:
         r = self.corr()
@@ -408,7 +368,9 @@ class RunningExpertAdvPearson:
             "n": self.n.astype(np.int64),
             "mean_abs": float(np.mean(abs_r)) if abs_r.size else float("nan"),
             "max_abs": float(np.max(abs_r)) if abs_r.size else float("nan"),
-            "frac_abs_gt_0p10": (float(np.mean(abs_r > 0.10)) if abs_r.size else float("nan")),
+            "frac_abs_gt_0p10": (
+                float(np.mean(abs_r > 0.10)) if abs_r.size else float("nan")
+            ),
         }
 
 
@@ -481,14 +443,24 @@ class RunningExpertCoreCrossCorr:
         c = self.corr()
         finite = np.isfinite(c)
         abs_c = np.abs(c[finite]) if np.any(finite) else np.array([], dtype=np.float64)
-        sem_max = np.nanmax(np.abs(c), axis=1) if (c.ndim == 2 and c.shape[1] > 0) else np.array([], dtype=np.float64)
+        sem_max = (
+            np.nanmax(np.abs(c), axis=1)
+            if (c.ndim == 2 and c.shape[1] > 0)
+            else np.array([], dtype=np.float64)
+        )
         return {
             "corr": c.astype(np.float32),
             "n": int(self.n),
             "mean_abs": float(np.mean(abs_c)) if abs_c.size else float("nan"),
-            "p95_abs": (float(np.percentile(abs_c, 95.0)) if abs_c.size else float("nan")),
-            "frac_abs_gt_0p30": (float(np.mean(abs_c > 0.30)) if abs_c.size else float("nan")),
-            "sem_max_abs_mean": (float(np.nanmean(sem_max)) if sem_max.size else float("nan")),
+            "p95_abs": (
+                float(np.percentile(abs_c, 95.0)) if abs_c.size else float("nan")
+            ),
+            "frac_abs_gt_0p30": (
+                float(np.mean(abs_c > 0.30)) if abs_c.size else float("nan")
+            ),
+            "sem_max_abs_mean": (
+                float(np.nanmean(sem_max)) if sem_max.size else float("nan")
+            ),
         }
 
 
@@ -530,7 +502,9 @@ def proposal1_expert_adv_corr_from_rollout(
         "n": n.astype(np.int64),
         "mean_abs": float(np.mean(abs_r)) if abs_r.size else float("nan"),
         "max_abs": float(np.max(abs_r)) if abs_r.size else float("nan"),
-        "frac_abs_gt_0p10": (float(np.mean(abs_r > 0.10)) if abs_r.size else float("nan")),
+        "frac_abs_gt_0p10": (
+            float(np.mean(abs_r > 0.10)) if abs_r.size else float("nan")
+        ),
     }
 
 
@@ -559,19 +533,29 @@ def proposal2_expert_core_xcorr_from_rollout(
 
     finite = np.isfinite(c)
     abs_c = np.abs(c[finite]) if np.any(finite) else np.array([], dtype=np.float64)
-    sem_max = np.nanmax(np.abs(c), axis=1) if c.shape[1] > 0 else np.array([], dtype=np.float64)
+    sem_max = (
+        np.nanmax(np.abs(c), axis=1)
+        if c.shape[1] > 0
+        else np.array([], dtype=np.float64)
+    )
 
     return {
         "ok": True,
         "corr": c.astype(np.float32),
         "mean_abs": float(np.mean(abs_c)) if abs_c.size else float("nan"),
         "p95_abs": float(np.percentile(abs_c, 95.0)) if abs_c.size else float("nan"),
-        "frac_abs_gt_0p30": (float(np.mean(abs_c > 0.30)) if abs_c.size else float("nan")),
-        "sem_max_abs_mean": (float(np.nanmean(sem_max)) if sem_max.size else float("nan")),
+        "frac_abs_gt_0p30": (
+            float(np.mean(abs_c > 0.30)) if abs_c.size else float("nan")
+        ),
+        "sem_max_abs_mean": (
+            float(np.nanmean(sem_max)) if sem_max.size else float("nan")
+        ),
     }
 
 
-def proposal2_topk_abs_pairs(corr: np.ndarray, k: int = 20) -> List[Tuple[int, int, float]]:
+def proposal2_topk_abs_pairs(
+    corr: np.ndarray, k: int = 20
+) -> List[Tuple[int, int, float]]:
     c = np.asarray(corr, dtype=np.float64)
     if c.ndim != 2 or c.size == 0:
         return []
@@ -642,7 +626,9 @@ class ProbeRecorder:
         self._cur_X.append(x)
         self._cur_r.append(float(reward))
 
-    def end_episode(self, meta_updates: Optional[Dict[str, Any]] = None) -> Optional[ProbeEpisode]:
+    def end_episode(
+        self, meta_updates: Optional[Dict[str, Any]] = None
+    ) -> Optional[ProbeEpisode]:
         if not self._active:
             return None
         self._active = False
@@ -768,7 +754,9 @@ def probe_build_xy(
     return X_out, y_out
 
 
-def subsample_rows(X: np.ndarray, y: np.ndarray, max_rows: int, seed: int) -> Tuple[np.ndarray, np.ndarray]:
+def subsample_rows(
+    X: np.ndarray, y: np.ndarray, max_rows: int, seed: int
+) -> Tuple[np.ndarray, np.ndarray]:
     X = np.asarray(X)
     y = np.asarray(y)
     max_rows = int(max_rows)
@@ -832,7 +820,9 @@ def ridge_fit(
     return w.astype(np.float64), float(b0), scaler
 
 
-def ridge_predict(X: np.ndarray, w: np.ndarray, b: float, scaler: Standardizer) -> np.ndarray:
+def ridge_predict(
+    X: np.ndarray, w: np.ndarray, b: float, scaler: Standardizer
+) -> np.ndarray:
     Xs = scaler.transform(np.asarray(X, dtype=np.float64))
     return (Xs @ w + float(b)).astype(np.float64)
 
@@ -862,7 +852,9 @@ def mae(y: np.ndarray, yhat: np.ndarray) -> float:
 # ===========================
 
 
-def spline_knots_quantile(x: np.ndarray, n_knots: int, q_low: float = 0.05, q_high: float = 0.95) -> np.ndarray:
+def spline_knots_quantile(
+    x: np.ndarray, n_knots: int, q_low: float = 0.05, q_high: float = 0.95
+) -> np.ndarray:
     """
     Returns interior knots based on quantiles. Filters duplicates.
     """
@@ -876,7 +868,9 @@ def spline_knots_quantile(x: np.ndarray, n_knots: int, q_low: float = 0.05, q_hi
     return k.astype(np.float64)
 
 
-def spline_expand_truncated_power(X: np.ndarray, knots_per_feature: List[np.ndarray]) -> np.ndarray:
+def spline_expand_truncated_power(
+    X: np.ndarray, knots_per_feature: List[np.ndarray]
+) -> np.ndarray:
     """
     For each feature x:
       [x, x^2, x^3, (x-k1)_+^3, ...]
@@ -975,19 +969,36 @@ def run_probe_suite(
     }
 
     # Build train/val datasets (same target definition)
-    Xtr_core, ytr = probe_build_xy(tr_eps, sem_dim, mode="core", gamma=gamma, k=k_return)
-    Xva_core, yva = probe_build_xy(va_eps, sem_dim, mode="core", gamma=gamma, k=k_return)
-    Xtr_full, _ = probe_build_xy(tr_eps, sem_dim, mode="coreexp", gamma=gamma, k=k_return)
-    Xva_full, _ = probe_build_xy(va_eps, sem_dim, mode="coreexp", gamma=gamma, k=k_return)
+    Xtr_core, ytr = probe_build_xy(
+        tr_eps, sem_dim, mode="core", gamma=gamma, k=k_return
+    )
+    Xva_core, yva = probe_build_xy(
+        va_eps, sem_dim, mode="core", gamma=gamma, k=k_return
+    )
+    Xtr_full, _ = probe_build_xy(
+        tr_eps, sem_dim, mode="coreexp", gamma=gamma, k=k_return
+    )
+    Xva_full, _ = probe_build_xy(
+        va_eps, sem_dim, mode="coreexp", gamma=gamma, k=k_return
+    )
 
-    if Xtr_core.size == 0 or Xva_core.size == 0 or Xtr_full.size == 0 or Xva_full.size == 0:
+    if (
+        Xtr_core.size == 0
+        or Xva_core.size == 0
+        or Xtr_full.size == 0
+        or Xva_full.size == 0
+    ):
         return {"ok": False, "reason": "empty_xy"}
 
     # Subsample to control cost
     Xtr_core, ytr = subsample_rows(Xtr_core, ytr, max_rows=max_samples, seed=seed + 11)
     Xva_core, yva = subsample_rows(Xva_core, yva, max_rows=max_samples, seed=seed + 13)
-    Xtr_full, _ = subsample_rows(Xtr_full, ytr, max_rows=Xtr_core.shape[0], seed=seed + 17)
-    Xva_full, _ = subsample_rows(Xva_full, yva, max_rows=Xva_core.shape[0], seed=seed + 19)
+    Xtr_full, _ = subsample_rows(
+        Xtr_full, ytr, max_rows=Xtr_core.shape[0], seed=seed + 17
+    )
+    Xva_full, _ = subsample_rows(
+        Xva_full, yva, max_rows=Xva_core.shape[0], seed=seed + 19
+    )
 
     # ----- Linear ridge probe
     w_c, b_c, sc_c = ridge_fit(Xtr_core, ytr, alpha=alpha_linear)
@@ -1000,12 +1011,20 @@ def run_probe_suite(
         "core": {"val_r2": r2_score(yva, yhat_c_va), "val_mae": mae(yva, yhat_c_va)},
         "coreexp": {"val_r2": r2_score(yva, yhat_f_va), "val_mae": mae(yva, yhat_f_va)},
     }
-    out["linear"]["delta_val_r2"] = float(out["linear"]["coreexp"]["val_r2"] - out["linear"]["core"]["val_r2"])
-    out["linear"]["delta_val_mae"] = float(out["linear"]["core"]["val_mae"] - out["linear"]["coreexp"]["val_mae"])
+    out["linear"]["delta_val_r2"] = float(
+        out["linear"]["coreexp"]["val_r2"] - out["linear"]["core"]["val_r2"]
+    )
+    out["linear"]["delta_val_mae"] = float(
+        out["linear"]["core"]["val_mae"] - out["linear"]["coreexp"]["val_mae"]
+    )
 
     # ----- Spline probe (additive cubic spline basis + ridge)
-    spline_core = spline_fit_predict(Xtr_core, ytr, Xva_core, yva, alpha=alpha_spline, n_knots=spline_knots)
-    spline_full = spline_fit_predict(Xtr_full, ytr, Xva_full, yva, alpha=alpha_spline, n_knots=spline_knots)
+    spline_core = spline_fit_predict(
+        Xtr_core, ytr, Xva_core, yva, alpha=alpha_spline, n_knots=spline_knots
+    )
+    spline_full = spline_fit_predict(
+        Xtr_full, ytr, Xva_full, yva, alpha=alpha_spline, n_knots=spline_knots
+    )
 
     out["spline"] = {
         "core": {
@@ -1019,8 +1038,12 @@ def run_probe_suite(
             "basis_dim": int(spline_full["basis_dim"]),
         },
     }
-    out["spline"]["delta_val_r2"] = float(out["spline"]["coreexp"]["val_r2"] - out["spline"]["core"]["val_r2"])
-    out["spline"]["delta_val_mae"] = float(out["spline"]["core"]["val_mae"] - out["spline"]["coreexp"]["val_mae"])
+    out["spline"]["delta_val_r2"] = float(
+        out["spline"]["coreexp"]["val_r2"] - out["spline"]["core"]["val_r2"]
+    )
+    out["spline"]["delta_val_mae"] = float(
+        out["spline"]["core"]["val_mae"] - out["spline"]["coreexp"]["val_mae"]
+    )
 
     out["data"] = {
         "n_train": int(Xtr_core.shape[0]),
@@ -1045,9 +1068,15 @@ phase management (finding out major green phases and register auxilliary phases)
 class TLSPhasePlan:
     program_id: str
     phases: List[Tuple[int, float, str]]  # (idx, duration_s, state_str)
-    major_greens: List[int]  # indices of "major green" phases (agent actions map to these)
-    owner_major: List[int]  # owner_major[phase_idx] -> major green phase idx that owns it
-    aux_after_major: Dict[int, List[int]]  # major green idx -> aux phase indices after it until next major
+    major_greens: List[
+        int
+    ]  # indices of "major green" phases (agent actions map to these)
+    owner_major: List[
+        int
+    ]  # owner_major[phase_idx] -> major green phase idx that owns it
+    aux_after_major: Dict[
+        int, List[int]
+    ]  # major green idx -> aux phase indices after it until next major
     phase_duration: Dict[int, float]  # phase_idx -> configured duration (seconds)
 
 
@@ -1071,7 +1100,9 @@ def _get_active_program_logic(tls_id: str):
     return program_id, logic
 
 
-def _default_is_major_green(state: str, duration_s: float, *, min_major_green_s: float) -> bool:
+def _default_is_major_green(
+    state: str, duration_s: float, *, min_major_green_s: float
+) -> bool:
     """
     Heuristic "major green":
       - contains any green signal (G/g)
@@ -1080,7 +1111,11 @@ def _default_is_major_green(state: str, duration_s: float, *, min_major_green_s:
     """
     has_green = ("G" in state) or ("g" in state)
     has_yellow = ("y" in state) or ("Y" in state)
-    return has_green and (not has_yellow) and (float(duration_s) >= float(min_major_green_s))
+    return (
+        has_green
+        and (not has_yellow)
+        and (float(duration_s) >= float(min_major_green_s))
+    )
 
 
 def get_tls_phase_plan(
@@ -1121,14 +1156,17 @@ def get_tls_phase_plan(
     if is_major_green is None:
 
         def is_major_green_local(s: str, d: float) -> bool:
-            return _default_is_major_green(s, d, min_major_green_s=float(min_major_green_s))
+            return _default_is_major_green(
+                s, d, min_major_green_s=float(min_major_green_s)
+            )
 
         is_major_green = is_major_green_local
 
     major_greens = [idx for (idx, dur, st) in phases if is_major_green(st, dur)]
     if not major_greens:
         raise RuntimeError(
-            f"[{tls_id}] No major green phases found. " f"Adjust min_major_green_s or provide is_major_green()."
+            f"[{tls_id}] No major green phases found. "
+            f"Adjust min_major_green_s or provide is_major_green()."
         )
 
     n = len(phases)
@@ -1165,7 +1203,9 @@ def get_tls_phase_plan(
     return plan
 
 
-def tls_major_action_dim(tls_id: str, cache: Dict[str, Any], *, min_major_green_s: float = 5.0) -> int:
+def tls_major_action_dim(
+    tls_id: str, cache: Dict[str, Any], *, min_major_green_s: float = 5.0
+) -> int:
     plan = get_tls_phase_plan(tls_id, cache, min_major_green_s=min_major_green_s)
     return int(len(plan.major_greens))
 
@@ -1176,7 +1216,9 @@ def tls_action_to_major_phase(
     plan = get_tls_phase_plan(tls_id, cache, min_major_green_s=min_major_green_s)
     a = int(action)
     if a < 0 or a >= len(plan.major_greens):
-        raise ValueError(f"action out of range: {a} (num_major={len(plan.major_greens)})")
+        raise ValueError(
+            f"action out of range: {a} (num_major={len(plan.major_greens)})"
+        )
     return int(plan.major_greens[a])
 
 
@@ -1188,7 +1230,9 @@ def tls_current_major_phase(
     min_major_green_s: float = 5.0,
 ) -> int:
     plan = get_tls_phase_plan(tls_id, cache, min_major_green_s=min_major_green_s)
-    cur = int(traci.trafficlight.getPhase(tls_id) if current_phase is None else current_phase)
+    cur = int(
+        traci.trafficlight.getPhase(tls_id) if current_phase is None else current_phase
+    )
     if cur < 0 or cur >= len(plan.owner_major):
         # fall back to the first major green
         return int(plan.major_greens[0])
@@ -1212,7 +1256,9 @@ def tls_build_switch_segments(
     Returns list[(phase_idx, duration_s)].
     """
     plan = get_tls_phase_plan(tls_id, cache, min_major_green_s=min_major_green_s)
-    cur_major = tls_current_major_phase(tls_id, cache, current_phase=current_phase, min_major_green_s=min_major_green_s)
+    cur_major = tls_current_major_phase(
+        tls_id, cache, current_phase=current_phase, min_major_green_s=min_major_green_s
+    )
     tgt = int(target_major_phase)
 
     segs: List[Tuple[int, float]] = []
@@ -1266,37 +1312,46 @@ helper functions
 # =======================
 # [NEW] shared queue extractor
 # =======================
-
-
 def _extract_queues_from_encoded_state(
+    state_vec: Sequence[float],
     *,
-    num_lanes: Optional[int] = None,
+    num_lanes: int,
+    lane_block_size: int,
+    queue_offset_in_block: int,
     scale: float = 1.0,
     clip_nonnegative: bool = True,
-    scene_stats: Any,
-    scene_key: str = "queue_ratio_norm",
 ) -> List[float]:
     """
-    Extract per-lane queue-like values either from
-    precomputed scene snapshot.
+    Extract per-lane queue lengths from the encoded state vector.
+
+    Returns a list of length num_lanes.
+    If scale > 0, each queue is divided by scale (useful for normalization).
     """
-    if scene_stats is not None:
-        qs = _scene_get_per_lane_array(scene_stats, scene_key)
-        if num_lanes is not None and int(num_lanes) != qs.shape[0]:
-            raise ValueError(f"num_lanes={num_lanes} does not match scene_stats lanes={qs.shape[0]}")
-        s = float(scale) if float(scale) > 0.0 else 1.0
-        out: List[float] = []
-        for q in qs:
-            qf = float(q)
-            if clip_nonnegative and qf < 0.0:
-                qf = 0.0
-            out.append(qf / s)
-        return out
-    else:
-        raise ValueError("scene_stats is required to extract queues when num_lanes is not None")
+    if num_lanes <= 0:
+        raise ValueError("num_lanes must be > 0")
+
+    expected_min_len = num_lanes * lane_block_size
+    if len(state_vec) < expected_min_len:
+        raise ValueError(
+            f"state_vec too short: len={len(state_vec)} < {expected_min_len} "
+            f"(num_lanes={num_lanes}, lane_block_size={lane_block_size})"
+        )
+
+    s = float(scale) if float(scale) > 0.0 else 1.0
+
+    queues: List[float] = []
+    for i in range(num_lanes):
+        idx = i * lane_block_size + queue_offset_in_block
+        q = float(state_vec[idx])
+        if clip_nonnegative and q < 0.0:
+            q = 0.0
+        queues.append(q / s)
+    return queues
 
 
-def start_sumo(sumocfg: str, *, gui: bool, delay_ms: int, sumo_seed: int, traffic_scale: float) -> None:
+def start_sumo(
+    sumocfg: str, *, gui: bool, delay_ms: int, sumo_seed: int, traffic_scale: float
+) -> None:
     binary = checkBinary("sumo-gui" if gui else "sumo")
     cmd: List[str] = [
         binary,
@@ -1344,81 +1399,26 @@ various reward functions
 """
 
 
-def _scene_lane_ids(scene_stats: Any) -> Tuple[str, ...]:
-    if scene_stats is None:
-        raise ValueError("scene_stats is required")
-    if hasattr(scene_stats, "lane_ids"):
-        return tuple(getattr(scene_stats, "lane_ids"))
-    if isinstance(scene_stats, dict):
-        if "lane_ids" in scene_stats:
-            return tuple(scene_stats["lane_ids"])
-        meta = scene_stats.get("meta", {})
-        if "lane_ids" in meta:
-            return tuple(meta["lane_ids"])
-    raise KeyError("scene_stats does not contain lane_ids")
-
-
-def _scene_num_lanes(scene_stats: Any) -> int:
-    return int(len(_scene_lane_ids(scene_stats)))
-
-
-def _scene_per_lane_map(scene_stats: Any) -> Dict[str, Any]:
-    if hasattr(scene_stats, "per_lane"):
-        return getattr(scene_stats, "per_lane")
-    if isinstance(scene_stats, dict) and "per_lane" in scene_stats:
-        return scene_stats["per_lane"]
-    raise KeyError("scene_stats does not contain per_lane")
-
-
-def _scene_global_map(scene_stats: Any) -> Dict[str, Any]:
-    if hasattr(scene_stats, "global_stats"):
-        return getattr(scene_stats, "global_stats")
-    if isinstance(scene_stats, dict) and "global_stats" in scene_stats:
-        return scene_stats["global_stats"]
-    return {}
-
-
-def _scene_extras_map(scene_stats: Any) -> Dict[str, Any]:
-    if hasattr(scene_stats, "extras"):
-        return getattr(scene_stats, "extras")
-    if isinstance(scene_stats, dict) and "extras" in scene_stats:
-        return scene_stats["extras"]
-    return {}
-
-
-def _scene_get_per_lane_array(scene_stats: Any, key: str) -> np.ndarray:
-    per_lane = _scene_per_lane_map(scene_stats)
-    if key not in per_lane:
-        raise KeyError(f"scene_stats.per_lane missing key {key!r}")
-    arr = np.asarray(per_lane[key], dtype=np.float64).reshape(-1)
-    n = _scene_num_lanes(scene_stats)
-    if arr.shape[0] != n:
-        raise ValueError(f"scene_stats.per_lane[{key!r}] has length {arr.shape[0]} but expected {n}")
-    return arr
-
-
-def _scene_get_extra(scene_stats: Any, key: str, default: Any = None) -> Any:
-    return _scene_extras_map(scene_stats).get(key, default)
-
-
-def _scene_normalization_ref(scene_stats: Any, key: str, fallback: float) -> float:
-    norm = _scene_get_extra(scene_stats, "normalization", {})
-    try:
-        return float(norm.get(key, fallback))
-    except Exception:
-        return float(fallback)
-
-
 def zone_exceedance_ratio_from_encoded_state(
+    state_vec,
+    num_lanes,
+    lane_block_size=4,
+    queue_offset_in_block=0,
     q0=0.25,
     tau=0.07,
-    scene_stats: Any | None = None,
 ):
-    if scene_stats is not None:
-        qv = _scene_get_per_lane_array(scene_stats, "queue_ratio_norm")
+    # q_i are already normalized queue features in [0,1] from your encoder
+    qs = []
+    base = 0
+    for _ in range(num_lanes):
+        q = float(state_vec[base + queue_offset_in_block])
+        qs.append(np.clip(q, 0.0, 1.0))
+        base += lane_block_size
+    qv = np.asarray(qs, dtype=np.float64)
 
+    # soft exceedance per lane
     ei = 1.0 / (1.0 + np.exp(-(qv - q0) / max(1e-6, tau)))
-    z = float(np.mean(ei))
+    z = float(np.mean(ei))  # in [0,1]
     return z
 
 
@@ -1442,60 +1442,222 @@ def zone_deadband_reward(
         return float(-lam * (x**p))
 
 
-def reward_softmax_queue_from_encoded_state(
+def reward_avg_queue_from_encoded_state(
+    state_vec: Sequence[float],
     *,
-    num_lanes: Optional[int] = None,
+    num_lanes: int,
+    lane_block_size: int = 4,
+    queue_offset_in_block: int = 0,
+    reduce: str = "mean",
+) -> float:
+    """
+    Compute a reward from an encoded state vector based on (average) queue length.
+
+    Assumptions about your encoding (matching your current encoder, excluding time_in_phase):
+      - Per incoming lane block: [queue, veh_count, mean_speed, waiting_time]  (lane_block_size=4)
+      - Then: is_green_now per lane  (num_lanes values)
+      - Then: phase one-hot          (remaining values)
+      - time_in_phase has been dropped before calling this function.
+
+    Args:
+      state_vec: encoded feature vector (time_in_phase already removed if you dropped it)
+      num_lanes: number of incoming lanes encoded (must match your encoder's lane order)
+      lane_block_size: number of features per lane in the lane block (default 4)
+      queue_offset_in_block: index of queue feature within each lane block (default 0)
+      reduce: "mean" or "sum" over lanes
+
+    Returns:
+      Reward as float. Typical choice is negative mean queue:  reward = -avg_queue
+    """
+    if num_lanes <= 0:
+        raise ValueError("num_lanes must be > 0")
+
+    expected_min_len = num_lanes * lane_block_size
+    if len(state_vec) < expected_min_len:
+        raise ValueError(
+            f"state_vec too short: len={len(state_vec)} < {expected_min_len} "
+            f"(num_lanes={num_lanes}, lane_block_size={lane_block_size})"
+        )
+
+    queues = []
+    base = 0
+    for i in range(num_lanes):
+        idx = base + i * lane_block_size + queue_offset_in_block
+        q = float(state_vec[idx])
+        # queues should never be negative; clamp defensively
+        if q < 0.0:
+            q = 0.0
+        queues.append(q)
+
+    if reduce == "mean":
+        val = sum(queues) / float(num_lanes)
+    elif reduce == "sum":
+        val = sum(queues)
+    else:
+        raise ValueError("reduce must be 'mean' or 'sum'")
+    r = -(0.5 * val + 0.5 * max(queues))
+    return r
+
+
+def reward_top2_queue_from_encoded_state(
+    state_vec: Sequence[float],
+    *,
+    num_lanes: int,
+    lane_block_size: int = 4,
+    queue_offset_in_block: int = 0,
+    weights: Tuple[float, float] = (0.7, 0.3),
+    power: float = 1.0,
+    scale: float = 1.0,
+    clip_nonnegative: bool = True,
+) -> float:
+    """
+    Reward based on the TOP-2 longest queues across incoming lanes.
+
+    Assumptions about encoding (matching your current encoder, time_in_phase dropped):
+      - Per incoming lane block: [queue, veh_count, mean_speed, waiting_time] (lane_block_size=4)
+      - Then: is_green_now per lane (num_lanes values)
+      - Then: phase one-hot (remaining values)
+
+    Args:
+      state_vec: encoded feature vector.
+      num_lanes: number of incoming lanes encoded.
+      lane_block_size: number of features per lane in the lane block.
+      queue_offset_in_block: index of queue feature within each lane block.
+      weights: (w1, w2) weights for largest and 2nd-largest queues. Should sum to 1.0 (recommended).
+      power: >=1.0. If >1, penalizes long queues more heavily (starvation/spillback).
+      scale: optional scaling divisor applied to queues before computing penalty (useful when combining with throughput).
+      clip_nonnegative: clamp negative queue values to 0 defensively.
+
+    Returns:
+      Reward (float): higher is better. Default is negative penalty:
+        reward = - (w1*q1^p + w2*q2^p), with optional scaling.
+
+    Notes:
+      - If num_lanes == 1, q2 is taken equal to q1.
+      - If scale <= 0, scale is treated as 1.0.
+    """
+    w1, w2 = float(weights[0]), float(weights[1])
+    if w1 < 0.0 or w2 < 0.0:
+        raise ValueError("weights must be nonnegative")
+    if power < 1.0:
+        raise ValueError("power must be >= 1.0")
+
+    queues = _extract_queues_from_encoded_state(
+        state_vec,
+        num_lanes=num_lanes,
+        lane_block_size=lane_block_size,
+        queue_offset_in_block=queue_offset_in_block,
+        scale=scale,
+        clip_nonnegative=clip_nonnegative,
+    )
+    # Top-2 largest
+    q_sorted = sorted(queues, reverse=True)
+    q1 = q_sorted[0]
+    q2 = q_sorted[1] if len(q_sorted) >= 2 else q_sorted[0]
+
+    penalty = w1 * (q1**power) + w2 * (q2**power)
+    return -penalty
+
+
+# =======================
+# [NEW] softmax-weighted queue penalty (smooth "top" approximation)
+# =======================
+def reward_softmax_queue_from_encoded_state(
+    state_vec: Sequence[float],
+    *,
+    num_lanes: int,
+    lane_block_size: int = 4,
+    queue_offset_in_block: int = 0,
     power: float = 1.0,
     scale: float = 1.0,
     softmax_beta: float = 5.0,
     clip_nonnegative: bool = True,
-    scene_stats: Any,
 ) -> float:
     """
-    Smooth alternative to "top-k" queue penalty: softmax-weighted penalty over all lanes.
+    Smooth alternative to "top-k" queue penalty: softmax-weighted penalty over ALL lanes.
+
+      weights_i = softmax(beta * q_i)
+      penalty   = sum_i weights_i * (q_i ** power)
+      reward    = -penalty
+
+    - weights sum to 1 (normalization)
+    - as beta -> +inf, weights concentrate on the maximum queue (approaches max-like behavior)
+    - power > 1 penalizes long queues super-linearly
+
+    All queues are first normalized by `scale` (same as in reward_top2_queue_from_encoded_state).
     """
     if power < 1.0:
         raise ValueError("power must be >= 1.0")
 
     qs = _extract_queues_from_encoded_state(
+        state_vec,
         num_lanes=num_lanes,
+        lane_block_size=lane_block_size,
+        queue_offset_in_block=queue_offset_in_block,
         scale=scale,
         clip_nonnegative=clip_nonnegative,
-        scene_stats=scene_stats,
-        scene_key="queue_ratio_norm",
     )
 
     beta = float(softmax_beta)
     if beta <= 0.0:
+        # beta<=0: raise error instead of uniform weights
         raise ValueError("softmax_beta must be > 0.0")
-
-    logits = beta * np.asarray(qs, dtype=np.float64)
-    logits = logits - float(np.max(logits))
-    exps = np.exp(logits)
-    weights = exps / float(np.sum(exps) + 1e-12)
+    else:
+        logits = beta * np.asarray(qs, dtype=np.float64)
+        logits = logits - float(np.max(logits))  # stabilize
+        exps = np.exp(logits)
+        weights = exps / float(np.sum(exps) + 1e-12)
 
     q_pow = np.asarray(qs, dtype=np.float64) ** float(power)
     penalty = float(np.sum(weights * q_pow))
     return -penalty
 
 
+# =======================
+# [NEW] softmax-weighted waiting-time barrier (smooth "max-wait" approximation)
+# =======================
 def reward_softmax_wait_barrier_from_encoded_state(
+    state_vec: Sequence[float],
     *,
+    num_lanes: int,
+    lane_block_size: int = 4,
+    wait_offset_in_block: int = 3,  # [queue, veh_count, speed, waiting_time]
     wait_ref_s: float = 60.0,
     softmax_beta: float = 10.0,
     barrier_start_s: float = 30.0,
     barrier_power: float = 1.0,
     clip_nonnegative: bool = True,
+    # [NEW] If True, state_vec already contains the bounded/normalized wait feature
+    # produced by encode_tsc_state_vector_bounded_v2 (soft-saturated to [0,1]).
     wait_is_encoded: bool = False,
-    scene_stats: Any,
 ) -> float:
     """
     Smooth waiting-time barrier reward (negative).
+    Two input conventions:
+      A) wait_is_encoded == False:
+         - state_vec wait is in seconds (unbounded)
+         - normalize by wait_ref_s
+         - threshold is barrier_start_s / wait_ref_s
 
-    Accepts either an encoded state vector or a precomputed scene snapshot. When
-    ``scene_stats`` is provided and ``wait_is_encoded`` is True, the barrier threshold is
-    mapped into encoded space using the snapshot's recorded ``wait_ref_s`` when available.
+      B) wait_is_encoded == True (encode_tsc_state_vector_bounded_v2):
+         - state_vec wait already is bounded/normalized to [0,1]:
+             w_enc = soft_sat(mean_wait_stopped / wait_ref_s, sat=1.0)
+         - DO NOT divide by wait_ref_s again
+         - map barrier_start_s into same encoded space:
+             start_enc = soft_sat(barrier_start_s / wait_ref_s, sat=1.0)
+
+    Steps:
+      1) Extract per-lane waiting times from encoded state
+      2) Normalize by wait_ref_s
+      3) Compute softmax-weighted mean wait (smooth max-like)
+      4) Apply a threshold barrier: penalty = max(0, soft_wait - start)^power
+      5) reward = -penalty
+
+    Returns:
+      wait_reward <= 0
     """
+    if num_lanes <= 0:
+        raise ValueError("num_lanes must be > 0")
     if wait_ref_s <= 0.0:
         raise ValueError("wait_ref_s must be > 0")
     if softmax_beta <= 0.0:
@@ -1503,28 +1665,45 @@ def reward_softmax_wait_barrier_from_encoded_state(
     if barrier_power < 1.0:
         raise ValueError("barrier_power must be >= 1.0")
 
-    if scene_stats is not None:
-        if wait_is_encoded:
-            waits = _scene_get_per_lane_array(scene_stats, "wait_norm")
-            wait_ref_for_encoding = _scene_normalization_ref(scene_stats, "wait_ref_s", wait_ref_s)
-            start = _soft_sat(float(barrier_start_s) / max(1e-6, wait_ref_for_encoding), sat=1.0)
-        else:
-            waits = _scene_get_per_lane_array(scene_stats, "mean_wait_stopped_s")
-            waits = waits / max(1e-6, float(wait_ref_s))
-            start = float(barrier_start_s) / max(1e-6, float(wait_ref_s))
-    else:
-        raise ValueError("scene_stats is required to extract waiting times when num_lanes is not None")
-    if clip_nonnegative:
-        waits = np.maximum(waits, 0.0)
+    expected_min_len = num_lanes * lane_block_size
+    if len(state_vec) < expected_min_len:
+        raise ValueError(
+            f"state_vec too short: len={len(state_vec)} < {expected_min_len} "
+            f"(num_lanes={num_lanes}, lane_block_size={lane_block_size})"
+        )
 
+    # ---- extract + normalize waiting times ----
+    waits = []
+    inv_ref = 1.0 / float(wait_ref_s)
+    for i in range(num_lanes):
+        idx = i * lane_block_size + wait_offset_in_block
+        w = float(state_vec[idx])
+        if clip_nonnegative and w < 0.0:
+            w = 0.0
+        # waits.append(w * inv_ref)  # normalized wait
+        if wait_is_encoded:
+            waits.append(w)
+        else:
+            waits.append(w * inv_ref)
+
+    waits = np.asarray(waits, dtype=np.float64)
+
+    # ---- softmax weights over waits (smooth max) ----
     beta = float(softmax_beta)
-    logits = beta * np.asarray(waits, dtype=np.float64)
-    logits = logits - float(np.max(logits))
+    logits = beta * waits
+    logits = logits - float(np.max(logits))  # stabilize
     exps = np.exp(logits)
     weights = exps / float(np.sum(exps) + 1e-12)
 
     soft_wait = float(np.sum(weights * waits))
-    overflow = soft_wait - float(start)
+
+    # ---- barrier threshold in normalized units ----
+    # start = float(barrier_start_s) * inv_ref
+    if wait_is_encoded:
+        start = _soft_sat(float(barrier_start_s) * inv_ref, sat=1.0)
+    else:
+        start = float(barrier_start_s) * inv_ref
+    overflow = soft_wait - start
     if overflow <= 0.0:
         return 0.0
 
@@ -1532,82 +1711,30 @@ def reward_softmax_wait_barrier_from_encoded_state(
     return -float(penalty)
 
 
-def reward_softmax_wait_barrier_from_encoded_state_v2(
-    *,
-    wait_ref_s: float = 60.0,
-    softmax_beta: float = 10.0,
-    barrier_start_s: float = 30.0,
-    barrier_power: float = 1.0,
-    clip_nonnegative: bool = True,
-    wait_is_encoded: bool = False,
-    scene_stats: Any,
-) -> float:
-    """
-    Softmax waiting-time barrier reward (negative), v2.
-
-    Difference from reward_softmax_wait_barrier_from_encoded_state(...):
-      - v2 always reads RAW waiting times from scene_stats (mean_wait_stopped_s)
-      - wait_ref_s and barrier_start_s therefore keep their literal meaning in seconds
-      - wait_is_encoded is accepted for backward compatibility but intentionally ignored
-
-    The output remains a normalized penalty so it stays numerically compatible with the
-    old reward family:
-      waits_norm = waits_seconds / wait_ref_s
-      start_norm = barrier_start_s / wait_ref_s
-      reward = -max(softmax_weighted_wait_norm - start_norm, 0) ** barrier_power
-    """
-    _ = wait_is_encoded  # backward-compatible no-op; v2 always uses raw seconds.
-
-    if scene_stats is None:
-        raise ValueError("scene_stats is required")
-    if wait_ref_s <= 0.0:
-        raise ValueError("wait_ref_s must be > 0")
-    if softmax_beta <= 0.0:
-        raise ValueError("softmax_beta must be > 0")
-    if barrier_power < 1.0:
-        raise ValueError("barrier_power must be >= 1.0")
-    if barrier_start_s < 0.0:
-        raise ValueError("barrier_start_s must be >= 0")
-
-    waits_s = _scene_get_per_lane_array(scene_stats, "mean_wait_stopped_s")
-    waits = np.asarray(waits_s, dtype=np.float64) / max(1e-6, float(wait_ref_s))
-    if clip_nonnegative:
-        waits = np.maximum(waits, 0.0)
-
-    beta = float(softmax_beta)
-    logits = beta * waits
-    logits = logits - float(np.max(logits))
-    exps = np.exp(logits)
-    weights = exps / float(np.sum(exps) + 1e-12)
-
-    soft_wait = float(np.sum(weights * waits))
-    start = float(barrier_start_s) / max(1e-6, float(wait_ref_s))
-    overflow = soft_wait - start
-    if overflow <= 0.0:
-        return 0.0
-
-    return -float(overflow ** float(barrier_power))
-
-
 def starvation_cost_from_encoded_state(
     *,
+    tls_id: str,
+    state_vec: Sequence[float],
+    cache: Dict,
+    num_lanes: int,
+    lane_block_size: int = 4,
     softmax_beta: float = 10.0,
     power: float = 1.0,
-    scene_stats: Any,
+    min_major_green_s: float = 5.0,
 ) -> float:
     """
-    Convert the per-major "time-since-served" features into a smooth starvation cost.
-
-    Supports either the encoded state vector layout or ``scene_stats.extras['signal_context']``.
+    Extract the per-major "time-since-served" features appended by
+    encode_tsc_state_vector_bounded_v2() and convert them into a smooth
+    starvation cost in [0, 1] (approximately).
     """
-    if scene_stats is not None:
-        sig_ctx = _scene_get_extra(scene_stats, "signal_context", {})
-        since = np.asarray(sig_ctx.get("time_since_major_green_norm", []), dtype=np.float64)
-        if since.size == 0:
-            return 0.0
-    else:
-        raise ValueError("scene_stats is required to extract time-since-served features for starvation cost")
-
+    plan = get_tls_phase_plan(tls_id, cache, min_major_green_s=float(min_major_green_s))
+    num_phases = int(len(plan.phases))
+    num_major = int(len(plan.major_greens))
+    offset = int(num_lanes) * int(lane_block_size) + int(num_lanes) + int(num_phases)
+    end = offset + num_major
+    if len(state_vec) < end:
+        return 0.0
+    since = np.asarray(state_vec[offset:end], dtype=np.float64)
     since = np.clip(since, 0.0, 1.0)
     logits = float(softmax_beta) * since
     logits = logits - float(np.max(logits))
@@ -1631,38 +1758,6 @@ def _get_tls_out_lanes(tls_id: str) -> list[str]:
             if out_lane:
                 out_lanes.add(out_lane)
     return sorted(out_lanes)
-
-
-def _decision_interval_factor_on_decision(
-    *,
-    sim_time: float,
-    cache: Dict,
-    base_interval_s: float,
-    last_time_key: str = "_tp_last_decision_t",
-) -> float:
-    """
-    Return dt_interval / base_interval_s using the same decision-clock key used by the
-    throughput tracker, but without mutating cache.
-
-    Notes
-    -----
-    - When there is no previous decision timestamp yet, return 1.0 so the first
-      priming call stays scale-neutral.
-    - This helper is intentionally read-only; reward_throughput_per_second_on_decision(...)
-      remains the single place that updates the throughput decision clock.
-    """
-    base = float(base_interval_s)
-    if base <= 0.0:
-        raise ValueError("base_interval_s must be > 0")
-
-    last_t = cache.get(last_time_key, None)
-    if last_t is None:
-        return 1.0
-
-    dt = float(sim_time) - float(last_t)
-    if dt <= 0.0:
-        return 1.0
-    return float(dt / base)
 
 
 def throughput_tracker_step(
@@ -1743,6 +1838,60 @@ def reward_throughput_per_second_on_decision(
     return count / dt
 
 
+def reward_throughput_plus_softmax_queue(
+    *,
+    tls_id: str,
+    sim_time: float,
+    state_vec: Sequence[float],
+    cache: Dict,
+    num_lanes: int,
+    throughput_ref_veh_per_s: float,
+    queue_ref_veh: float,
+    w_throughput: float = 1.0,
+    w_queue: float = 1.0,
+    queue_power: float = 1.0,
+    softmax_beta: float = 5.0,
+    lane_block_size: int = 4,
+    queue_offset_in_block: int = 0,
+    reward_clip: Optional[Tuple[float, float]] = (-1.0, 1.0),
+) -> float:
+    def _clip(x: float, lo: float, hi: float) -> float:
+        return lo if x < lo else hi if x > hi else x
+
+    if throughput_ref_veh_per_s <= 0.0:
+        raise ValueError("throughput_ref_veh_per_s must be > 0")
+    if queue_ref_veh <= 0.0:
+        raise ValueError("queue_ref_veh must be > 0")
+
+    thr = reward_throughput_per_second_on_decision(sim_time=sim_time, cache=cache)
+    thr_norm = _clip(float(thr) / float(throughput_ref_veh_per_s), 0.0, 1.0)
+
+    q_reward = reward_softmax_queue_from_encoded_state(
+        state_vec,
+        num_lanes=num_lanes,
+        lane_block_size=lane_block_size,
+        queue_offset_in_block=queue_offset_in_block,
+        power=queue_power,
+        scale=queue_ref_veh,
+        softmax_beta=softmax_beta,
+        clip_nonnegative=True,
+    )
+
+    print(
+        f">> reward: thr={thr:.3f} (norm {thr_norm:.3f}), softmax_queue_reward={q_reward:.5f}"
+    )
+
+    r = float(w_throughput) * thr_norm + float(w_queue) * float(q_reward)
+
+    if reward_clip is not None:
+        lo, hi = float(reward_clip[0]), float(reward_clip[1])
+        if lo > hi:
+            lo, hi = hi, lo
+        r = _clip(r, lo, hi)
+
+    return float(r)
+
+
 rcnt = 0
 
 
@@ -1750,47 +1899,58 @@ def reward_throughput_plus_softmax_queue_deltaq_plus_softmax_wait_barrier_v2(
     *,
     tls_id: str,
     sim_time: float,
+    state_vec: Sequence[float],
     cache: Dict,
-    num_lanes: Optional[int] = None,
-    scene_stats: Any,
+    num_lanes: int,
     throughput_ref_veh_per_s: float,
     queue_ref_veh: float,
     wait_ref_s: float = 60.0,
     wait_barrier_start_s: float = 30.0,
+    # ---- weights (recommended defaults below) ----
     w_throughput: float = 1.0,
     w_queue: float = 1.0,
     w_delta_queue: float = 0.5,
     w_wait_barrier: float = 0.5,
     w_starve_potential: float = 0.0,
     w_queue_zone: float = 0.3,
+    # ---- queue term params ----
     queue_power: float = 1.0,
     softmax_queue_beta: float = 5.0,
+    # ---- wait term params ----
     softmax_wait_beta: float = 10.0,
     wait_barrier_power: float = 1.0,
+    # ---- starvation potential params ----
     starve_softmax_beta: float = 5.0,
     starve_power: float = 1.0,
     gamma_dt: float = 1.0,
     min_major_green_s: float = 5.0,
-    zone_q0: float = 0.29,
-    zone_tau: float = 0.07,
-    zone_lo: float = 0.15,
-    zone_hi: float = 0.45,
-    zone_r_good: float = 0.15,
-    zone_m1: float = 0.05,
-    zone_m2: float = 0.1,
-    zone_lambda: float = 0.6,
-    zone_p: float = 2.0,
+    # ---- zone shaping params (hardcoded defaults; no run_ppo changes needed) ----
+    zone_q0: float = 0.29,  # lane queue exceedance center
+    zone_tau: float = 0.07,  # softness of exceedance sigmoid
+    zone_lo: float = 0.15,  # good coverage boundary
+    zone_hi: float = 0.45,  # bad coverage starts
+    zone_r_good: float = 0.15,  # reward when clearly in good region
+    zone_m1: float = 0.05,  # mild slope in good region
+    zone_m2: float = 0.1,  # mild slope in middle region
+    zone_lambda: float = 0.6,  # penalty scale in bad region
+    zone_p: float = 2.0,  # curvature in bad region
+    # ---- encoding layout ----
+    lane_block_size: int = 4,
+    queue_offset_in_block: int = 0,
+    wait_offset_in_block: int = 3,
 ) -> float:
     global rcnt
     """
-    Combined throughput/queue/wait/starvation reward.
+    Reward terms:
+      1) Throughput term (normalized by throughput_ref_veh_per_s, NO CLIP)
+      2) Softmax queue penalty (negative)
+      3) Delta softmax queue improvement: (prev_penalty - cur_penalty) (positive if improved)
+      4) Softmax wait barrier penalty (negative): smooth "max-wait" above a threshold
 
-    When ``scene_stats`` is supplied, all state-derived quantities are read semantically
-    from the precomputed snapshot instead of relying on encoded-vector offsets.
-    Throughput tracking still uses ``cache`` exactly as before.
+    Notes:
+      - No final reward clipping: uses full reward range.
+      - Delta term uses cached previous softmax-queue penalty per TLS.
     """
-    if scene_stats is None:
-        raise ValueError("scene_stats is required for this reward function")
     if throughput_ref_veh_per_s <= 0.0:
         raise ValueError("throughput_ref_veh_per_s must be > 0")
     if queue_ref_veh <= 0.0:
@@ -1798,56 +1958,79 @@ def reward_throughput_plus_softmax_queue_deltaq_plus_softmax_wait_barrier_v2(
     if wait_ref_s <= 0.0:
         raise ValueError("wait_ref_s must be > 0")
 
-    if scene_stats is not None and num_lanes is None:
-        num_lanes = _scene_num_lanes(scene_stats)
-    if num_lanes is None:
-        raise ValueError("num_lanes must be provided")
-
+    # 1) Throughput (veh/s) over last decision interval, normalized (no clamp)
     thr = reward_throughput_per_second_on_decision(sim_time=sim_time, cache=cache)
     thr_norm = float(thr) / float(throughput_ref_veh_per_s)
 
+    # 2) Absolute softmax queue reward (negative)
     q_reward = reward_softmax_queue_from_encoded_state(
+        state_vec,
         num_lanes=num_lanes,
+        lane_block_size=lane_block_size,
+        queue_offset_in_block=queue_offset_in_block,
         power=queue_power,
         scale=queue_ref_veh,
         softmax_beta=softmax_queue_beta,
         clip_nonnegative=True,
-        scene_stats=scene_stats,
     )
-    q_penalty = -float(q_reward)
+    # convert reward -> penalty scalar for delta
+    q_penalty = -float(q_reward)  # >= 0
 
+    # 3) Delta softmax queue improvement (positive if queues improved)
     prev_key = f"_rw_prev_softmax_q_penalty::{tls_id}"
     prev_penalty = cache.get(prev_key, None)
     cache[prev_key] = q_penalty
-    delta_q = 0.0 if prev_penalty is None else (float(prev_penalty) - float(q_penalty))
 
+    if prev_penalty is None:
+        delta_q = 0.0
+    else:
+        delta_q = float(prev_penalty) - float(q_penalty)  # >0 if improved
+
+    # 4) Softmax wait barrier (negative)
     wait_reward = reward_softmax_wait_barrier_from_encoded_state(
+        state_vec,
+        num_lanes=num_lanes,
+        lane_block_size=lane_block_size,
+        wait_offset_in_block=wait_offset_in_block,
         wait_ref_s=wait_ref_s,
         softmax_beta=softmax_wait_beta,
         barrier_start_s=wait_barrier_start_s,
         barrier_power=wait_barrier_power,
         clip_nonnegative=True,
         wait_is_encoded=True,
-        scene_stats=scene_stats,
     )
-
+    # 5) Potential-based starvation shaping (optional)
     starve_shape = 0.0
     if float(w_starve_potential) != 0.0:
         cur_cost = starvation_cost_from_encoded_state(
+            tls_id=tls_id,
+            state_vec=state_vec,
+            cache=cache,
+            num_lanes=num_lanes,
+            lane_block_size=lane_block_size,
             softmax_beta=float(starve_softmax_beta),
             power=float(starve_power),
-            scene_stats=scene_stats,
+            min_major_green_s=float(min_major_green_s),
         )
         prev_cost_key = f"_rw_prev_starve_cost::{tls_id}"
         prev_cost = cache.get(prev_cost_key, None)
         cache[prev_cost_key] = float(cur_cost)
         if prev_cost is not None:
-            starve_shape = float(w_starve_potential) * (float(prev_cost) - float(gamma_dt) * float(cur_cost))
+            starve_shape = float(w_starve_potential) * (
+                float(prev_cost) - float(gamma_dt) * float(cur_cost)
+            )
 
+    # 6) [NEW] queue coverage zone term (deadband/acceptable-region shaping)
+    # Requires you already pasted:
+    #   - zone_exceedance_ratio_from_encoded_state(...)
+    #   - zone_deadband_reward(...)
     z_cov = zone_exceedance_ratio_from_encoded_state(
+        state_vec,
+        num_lanes=num_lanes,
+        lane_block_size=lane_block_size,
+        queue_offset_in_block=queue_offset_in_block,
         q0=zone_q0,
         tau=zone_tau,
-        scene_stats=scene_stats,
     )
     r_zone = zone_deadband_reward(
         z_cov,
@@ -1860,6 +2043,7 @@ def reward_throughput_plus_softmax_queue_deltaq_plus_softmax_wait_barrier_v2(
         p=zone_p,
     )
 
+    # Final combined reward (no clipping)
     r = (
         float(w_throughput) * float(thr_norm)
         + float(w_queue) * float(q_reward)
@@ -1875,99 +2059,3 @@ def reward_throughput_plus_softmax_queue_deltaq_plus_softmax_wait_barrier_v2(
         )
     rcnt += 1
     return float(r)
-
-
-def reward_throughput_plus_softmax_queue_plus_softmax_wait_barrier_right_endpoint_v1(
-    *,
-    tls_id: str,
-    sim_time: float,
-    cache: Dict,
-    num_lanes: Optional[int] = None,
-    scene_stats: Any,
-    throughput_ref_veh_per_s: float,
-    queue_ref_veh: float,
-    wait_ref_s: float = 60.0,
-    wait_barrier_start_s: float = 30.0,
-    w_throughput: float = 1.0,
-    w_queue: float = 1.0,
-    w_wait_barrier: float = 1.0,
-    queue_power: float = 1.0,
-    softmax_queue_beta: float = 5.0,
-    softmax_wait_beta: float = 10.0,
-    wait_barrier_power: float = 1.0,
-    min_major_green_s: float = 5.0,
-) -> float:
-    """
-    Throughput + softmax queue + softmax wait-barrier reward with right-endpoint
-    interval integration (Option 2 / minimal-change fix).
-
-    Interpretation
-    --------------
-    The bracketed term is treated as an instantaneous reward-rate sampled at the end of
-    the decision interval. We approximate the interval integral by
-
-        reward ~= rate(end_of_interval) * dt_interval / min_major_green_s
-
-    where min_major_green_s is the base decision interval (normally the held major-green
-    duration). This keeps 5 s sustain intervals on the old scale while making longer
-    switch intervals contribute proportionally more positive/negative reward.
-    """
-    global rcnt
-    _ = tls_id  # kept for runtime interface compatibility and future logging/debug use.
-
-    if scene_stats is None:
-        raise ValueError("scene_stats is required for this reward function")
-    if throughput_ref_veh_per_s <= 0.0:
-        raise ValueError("throughput_ref_veh_per_s must be > 0")
-    if queue_ref_veh <= 0.0:
-        raise ValueError("queue_ref_veh must be > 0")
-    if wait_ref_s <= 0.0:
-        raise ValueError("wait_ref_s must be > 0")
-    if min_major_green_s <= 0.0:
-        raise ValueError("min_major_green_s must be > 0")
-
-    if scene_stats is not None and num_lanes is None:
-        num_lanes = _scene_num_lanes(scene_stats)
-    if num_lanes is None:
-        raise ValueError("num_lanes must be provided")
-
-    interval_factor = _decision_interval_factor_on_decision(
-        sim_time=sim_time,
-        cache=cache,
-        base_interval_s=min_major_green_s,
-    )
-
-    thr = reward_throughput_per_second_on_decision(sim_time=sim_time, cache=cache)
-    thr_norm = float(thr) / float(throughput_ref_veh_per_s)
-
-    q_reward = reward_softmax_queue_from_encoded_state(
-        num_lanes=num_lanes,
-        power=queue_power,
-        scale=queue_ref_veh,
-        softmax_beta=softmax_queue_beta,
-        clip_nonnegative=True,
-        scene_stats=scene_stats,
-    )
-
-    wait_reward = reward_softmax_wait_barrier_from_encoded_state_v2(
-        wait_ref_s=wait_ref_s,
-        softmax_beta=softmax_wait_beta,
-        barrier_start_s=wait_barrier_start_s,
-        barrier_power=wait_barrier_power,
-        clip_nonnegative=True,
-        wait_is_encoded=False,
-        scene_stats=scene_stats,
-    )
-
-    reward_rate = (
-        float(w_throughput) * float(thr_norm)
-        + float(w_queue) * float(q_reward)
-        + float(w_wait_barrier) * float(wait_reward)
-    )
-
-    if rcnt % 200 == 0:
-        print(
-            f">> reward: {reward_rate} thr={thr:.3f} (norm {thr_norm:.3f}), q={q_reward:.3f}, wait_barrier={wait_reward:.3f}, interval_factor={interval_factor:.3f}"
-        )
-    rcnt += 1
-    return float(interval_factor * reward_rate)
