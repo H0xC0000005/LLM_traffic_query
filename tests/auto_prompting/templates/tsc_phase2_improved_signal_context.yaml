@@ -35,9 +35,16 @@ variables:
     If possible, use libsumo. If TraCI-style code is needed, use the import pattern "import libsumo as traci" whenever possible.
     Query only the current timestep whenever possible, since past history is not explicitly stored.
     You may use an external cache if history is needed, but you must explicitly document the cache usage.
+
+    Traffic signal programs may contain both controllable service phases and non-service transition phases.
+    Non-service transition phases may include yellow, all-red, or other clearance states that are played between service phases. 
+    They are guaranteed no longer than 10s, and major green phases are guaranteed to be at least 10s.
+    The raw signal-program phase index is not necessarily the same as a controllable service-phase index.
+    The number of raw program phases and the number of controllable service phases are scenario-dependent and may change if auxiliary service phases or transition phases are added.
+    Do not assume a fixed number of green phases, and do not assume every program phase is a green service phase.
   scenario_instance: |
     The group is analyzing the following intersection:
-    "{N@8^(0,+1):L60|T|TR; E@90:LT|TR; S@197^(0,+1):L60|T|TR;W@270:LT|TR}"
+    "{N@335:->3; E@90^(+1,+1):T|TR; S@155^:LT|T|TRx; W@270^(+1,+1):L60|T|T}"
 
     There are no pedestrians in this intersection.
   feature_plan_prior: |-
@@ -93,10 +100,20 @@ variables:
     The final code should be Python and should use libsumo whenever possible.
     If expert code uses TraCI, prefer the compatibility pattern "import libsumo as traci" to minimize changes.
     The final function should assume access to a full simulation session and the traffic light system id.
-    It may access simulation attributes such as traffic light state, lanes, vehicles, positions, speeds, routes, waiting times, and network geometry when available.
+    It may access simulation-observable attributes such as traffic light state, lanes, vehicles, positions, speeds, routes, waiting times, and network geometry when available.
     Use the provided scenario prior and scenario instance directly to avoid misinterpreting the scenario assumptions or intersection encoding.
 
-    The cache reset is managed by the training loop.
+    For SUMO/libsumo implementation details, use available web-search or retrieval tools to check official SUMO/libsumo/TraCI documentation before finalizing uncertain API calls.
+    Prefer official SUMO documentation, generated API references, or source-level documentation over memory.
+    Do not invent libsumo API methods. If a method is uncertain, verify it with available tools or implement a conservative fallback that avoids relying on the uncertain method.
+
+    For signal-related feature implementations, derive signal phase and state structure inside the function.
+    Distinguish controllable service phases from yellow, all-red, or other clearance transition phases when the distinction matters.
+    Do not hardcode a fixed number of green phases or assume that all raw program phases are controllable service phases.
+    Do not require caller-supplied phase maps, timing dictionaries, or service-phase counts.
+    If exact signal-phase mapping cannot be recovered from simulation APIs, scenario encoding, current signal state, or cache, use a conservative signal-state feature or neutral fixed-shape fallback rather than raising an exception.
+
+    The cache reset is managed by the caller.
     Do not reset the cache inside the function.
     Do not use internal hidden cache state; only use the external cache argument.
     Cache keys should be semantically labeled to avoid clashes with other contents.
@@ -107,9 +124,10 @@ variables:
         tls_id: str,
         *,
         cache: dict | None = None,
-        <required_parameters_with_defaults_and_type_annotations>,
-        **kwargs
-    ) -> <vector_like_output_type>:
+        intersection_encoding: str = "<the scenario encoding from the prompt>",
+        <hyperparameters_with_defaults_only>,
+        **kwargs,
+    ) -> list[float]:
         """
         <summary of algorithm, no more than 100 words>
         <I/O and parameter documentation>
@@ -118,7 +136,25 @@ variables:
         """
         <body>
 
-    The return value must be vector-like and directly usable as downstream ML features after simple type conversion.
+    The caller will provide the traffic light system id and may provide the external cache.
+    The caller will not provide scenario-derived structures or simulation-observable structures.
+    The intersection encoding is given in this contract as a default string and should not need to be passed by the training loop.
+    `**kwargs` is for caller compatibility only; the core feature computation must not depend on hidden required values in `**kwargs`.
+
+    Only expose true hyperparameters as optional keyword arguments.
+    A true hyperparameter is a scalar or small constant that controls thresholds, horizons, smoothing, normalization, fallback assumptions, or similar configuration.
+    Do not include final-function parameters for observable structures that should be derived from the simulation, environment, dataset, scenario description, or cache.
+    Do not include final-function parameters whose default is None if the default call path raises when that parameter is not supplied.
+
+    The default call path must work with only `tls_id`, `cache`, `intersection_encoding`, default hyperparameters, and compatibility `**kwargs`.
+    Observable structures must be resolved inside the function by querying the simulation, parsing the scenario encoding, using the current environment state, using the external cache, or applying conservative fallbacks that preserve output shape.
+
+    Signal phase, service-phase, transition-phase, and timing structures must also be resolved internally.
+    Do not require caller-supplied phase dictionaries, service-phase counts, phase timing maps, or phase-to-service mappings.
+    Do not assume that raw program phases are all green service phases.
+    If exact signal-phase structure cannot be recovered, degrade safely with conservative signal-state features or neutral fixed-shape fallbacks.
+
+    The return value must be vector-like and directly usable as a numeric feature vector after simple type conversion.
     Do not return a dict or key-value structure from the final function.
     If an expert code piece produces a non-vector quantity, convert it into numeric vector dimensions.
     The final YAML response must include expert_feature_mapping with inclusive start and exclusive end indices for each expert's feature slice.
