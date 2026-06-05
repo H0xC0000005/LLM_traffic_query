@@ -1,0 +1,408 @@
+templates:
+  phase3:
+    expert_stats_update:
+      messages:
+        - role: system
+          content: |
+            You are the responsible feature-engineering expert for one existing feature block.
+            You are performing a conservative phase-3 statistical correction of your own previous artifact.
+
+            The evaluator feedback is statistical evidence, not an authoritative command.
+            You must first self-criticize the evaluator suggestion aggressively.
+            If a plausible semantic, statistical, or block-context reason can refute the evaluator suggestion,
+            prefer no_change or a minimal code-only statistical update.
+
+            You are not performing feature discovery again.
+            Preserve the responsible topic, feature family, output count, output order, and most of the previous feature plan.
+            Do not rewrite unaffected dimensions.
+            Do not change feature names, output order, or output count unless the provided evidence makes this unavoidable.
+
+            When outputting YAML, return one complete YAML document parsable by yaml.safe_load.
+            Use conservative YAML formatting: quote short string scalars with double quotes, use block scalars for long text or code,
+            and never place unquoted colons, braces, brackets, or leading dashes inside scalar values.
+            Do not include markdown fences, explanatory prose, or incomplete YAML fragments outside the returned YAML document.
+        - role: user
+          content: |
+            Phase-3 expert statistical correction task.
+
+            You received routed statistical feedback from the evaluator for your existing feature block.
+            This prompt is for code-only statistical correction unless your self-critique concludes that no change is needed.
+            You must not update the feature plan in this prompt.
+
+            Expert id:
+            {{ expert_id }}
+
+            Final topic assigned to you:
+            {{ current_topic_yaml }}
+
+            Previous scenario-specific feature plan:
+            {{ previous_feature_plan_yaml }}
+
+            Previous expert feature code artifact:
+            {{ previous_expert_code_yaml }}
+
+            Your expert-to-feature mapping slice:
+            {{ expert_feature_mapping_slice_yaml }}
+
+            Routed evaluator feedback for this expert:
+            {{ evaluator_feedback_yaml }}
+
+            Expert feature statistics for your block:
+            {{ expert_feature_stats_yaml }}
+
+            Baseline/reference feature statistics:
+            {{ baseline_feature_stats_yaml }}
+
+            Feature indexing convention:
+            {{ feature_indexing_spec_yaml }}
+
+            Optional task-specific phase-3 policy, if provided:
+            {{ task_specific_phase3_policy }}
+
+            Code synthesis prior:
+            {{ expert_code_synthesis_prior }}
+
+            Expert feature function contract:
+            {{ expert_feature_function_contract }}
+
+            Self-critique requirements:
+            - Restate the evaluator's statistical claim briefly.
+            - Try to refute the claim using the feature semantics, intended sparsity, categorical or indicator nature, boundary or transition behavior, scenario-specific non-activation, short-run coverage limits, and sibling dimensions in the same block.
+            - If a plausible justification exists, return correction_decision: "no_change".
+            - If the feature semantics and plan are sound but numeric distribution is mismatched, return correction_decision: "stats_only_code_update".
+            - Do not return feature_plan_and_code_update from this prompt.
+
+            Allowed code-only updates:
+            - adjust numerical presentation while preserving semantics;
+            - adjust scale, denominator, bounded transform, saturation, smoothing, fallback value, finite-value handling, or activation logic;
+            - replace a raw quantity with a semantically equivalent rate, ratio, occupancy, or bounded score when the previous scale is statistically mismatched;
+            - fix implementation bugs that cause constant zero, NaN, inf, or unintended dead outputs;
+            - preserve output count and order whenever possible.
+
+            Forbidden changes:
+            - do not invent an unrelated new feature family;
+            - do not change your topic responsibility;
+            - do not modify other experts' features;
+            - do not use baseline statistics as a direct target distribution;
+            - do not optimize toward any downstream task result;
+            - do not update the feature plan in this prompt.
+
+            Return exactly one complete YAML document with this schema:
+            expert_id: "<expert id>"
+            correction_decision: "no_change | stats_only_code_update"
+            reuse_previous_code: false
+            self_critique:
+              evaluator_claim_summary: |
+                <brief restatement of the evaluator issue>
+              refutation_attempts:
+                - |
+                  <semantic, statistical, or block-context reason why the issue may be acceptable>
+              final_diagnosis: |
+                <why the issue is ignored or corrected>
+              affected_dimensions:
+                - idx: 0
+                  issue_type: "<issue type from evaluator or refined by you>"
+                  decision: "ignore | adjust_distribution"
+                  reason: |
+                    <brief reason>
+            updated_feature_plan: null
+            updated_expert_feature_code: null
+            no_change_notes: null
+
+            If correction_decision is "no_change", set:
+            reuse_previous_code: true
+            updated_feature_plan: null
+            updated_expert_feature_code: null
+            no_change_notes: |
+              <why the previous artifact should be reused>
+
+            If correction_decision is "stats_only_code_update", set:
+            reuse_previous_code: false
+            updated_feature_plan: null
+            updated_expert_feature_code:
+              implementation_status: "<executable | needs_assembler_resolution | pseudocode_with_clear_algorithm>"
+              feature_code: |
+                <updated expert-level feature function or code piece>
+              feature_outputs:
+                - name: "<feature output name>"
+                  semantic_meaning: |
+                    <semantic meaning>
+                  output_shape: "<scalar | vector | list | other conservative description>"
+                  output_scale: "<expected numeric scale or corrected statistical behavior>"
+              required_inputs:
+                - name: "<input or parameter name>"
+                  availability_class: "<scenario_layout | environment_observable | dataset_field | cached_history | default_parameter>"
+                  source: |
+                    <logical source>
+                  type_description: "<quoted plain-language type description>"
+                  meaning: |
+                    <semantic meaning>
+              dependencies:
+                imports:
+                  - "<import name, if any>"
+                cache_keys:
+                  - "<cache key, if any>"
+              unresolved_items:
+                - name: "<symbol, API detail, or integration item; use [] if none>"
+                  reason: |
+                    <why it remains unresolved>
+                  suggested_resolution: |
+                    <how assembler should resolve it>
+              scenario_reflection:
+                uses_specific_scenario: true
+                reflected_scenario_properties:
+                  - |
+                    <scenario property used>
+                reason_if_generic: |
+                  <why generic implementation is sufficient if uses_specific_scenario is false>
+              alignment_notes: |
+                <why this update preserves the previous feature plan while correcting statistics>
+              assembler_notes: |
+                <anything the assembler should know>
+            no_change_notes: null
+
+    expert_feature_plan_update:
+      messages:
+        - role: system
+          content: |
+            You are the responsible feature-engineering expert for one existing feature block.
+            You are performing a conservative phase-3 correction because statistical evidence may indicate that part of the feature expression is weak or badly written.
+
+            The evaluator feedback is statistical evidence, not an authoritative command.
+            You must first self-criticize the evaluator suggestion aggressively.
+            If a plausible semantic, statistical, or block-context reason can refute the evaluator suggestion,
+            prefer no_change or a minimal code-only update instead of changing the feature plan.
+
+            You are not performing feature discovery again.
+            Preserve the responsible topic, feature family, output count, output order, and unaffected parts of the previous feature plan.
+            Update the feature plan only for dimensions or sub-features whose semantics are likely badly expressed by the previous feature artifact.
+            Do not rewrite unaffected dimensions.
+            Do not change feature names, output order, or output count unless the provided evidence makes this unavoidable.
+
+            When outputting YAML, return one complete YAML document parsable by yaml.safe_load.
+            Use conservative YAML formatting: quote short string scalars with double quotes, use block scalars for long text or code,
+            and never place unquoted colons, braces, brackets, or leading dashes inside scalar values.
+            Do not include markdown fences, explanatory prose, or incomplete YAML fragments outside the returned YAML document.
+        - role: user
+          content: |
+            Phase-3 expert feature-plan correction task.
+
+            You received routed statistical feedback from the evaluator for your existing feature block.
+            This prompt allows feature-plan revision only if self-critique concludes that the previous feature expression is likely weak, badly written, or semantically misrepresented.
+
+            Expert id:
+            {{ expert_id }}
+
+            Final topic assigned to you:
+            {{ current_topic_yaml }}
+
+            Previous scenario-specific feature plan:
+            {{ previous_feature_plan_yaml }}
+
+            Previous expert feature code artifact:
+            {{ previous_expert_code_yaml }}
+
+            Your expert-to-feature mapping slice:
+            {{ expert_feature_mapping_slice_yaml }}
+
+            Routed evaluator feedback for this expert:
+            {{ evaluator_feedback_yaml }}
+
+            Expert feature statistics for your block:
+            {{ expert_feature_stats_yaml }}
+
+            Baseline/reference feature statistics:
+            {{ baseline_feature_stats_yaml }}
+
+            Feature indexing convention:
+            {{ feature_indexing_spec_yaml }}
+
+            Optional task-specific phase-3 policy, if provided:
+            {{ task_specific_phase3_policy }}
+
+            Feature-plan prior:
+            {{ feature_plan_prior }}
+
+            Code synthesis prior:
+            {{ expert_code_synthesis_prior }}
+
+            Expert feature function contract:
+            {{ expert_feature_function_contract }}
+
+            Self-critique requirements:
+            - Restate the evaluator's statistical claim briefly.
+            - Try to refute the claim using the feature semantics, intended sparsity, categorical or indicator nature, boundary or transition behavior, scenario-specific non-activation, short-run coverage limits, and sibling dimensions in the same block.
+            - If a plausible justification exists, return correction_decision: "no_change".
+            - If the feature semantics and plan are sound but numeric distribution is mismatched, return correction_decision: "stats_only_code_update".
+            - Return correction_decision: "feature_plan_and_code_update" only when the previous feature expression is likely weak, badly written, or unable to express the intended semantics.
+
+            Allowed feature-plan updates:
+            - revise only the affected sub-feature expression;
+            - replace a dead or weak proxy with a more direct observable proxy for the same responsible topic;
+            - revise feature activation logic if the previous feature cannot fire under realistic observed conditions;
+            - keep the feature family and responsible topic stable;
+            - preserve output count and order whenever possible.
+
+            Forbidden changes:
+            - do not invent an unrelated new feature family;
+            - do not change your topic responsibility;
+            - do not modify other experts' features;
+            - do not use baseline statistics as a direct target distribution;
+            - do not optimize toward any downstream task result;
+            - do not rewrite unaffected parts of the previous feature plan.
+
+            Return exactly one complete YAML document with this schema:
+            expert_id: "<expert id>"
+            correction_decision: "no_change | stats_only_code_update | feature_plan_and_code_update"
+            reuse_previous_code: false
+            self_critique:
+              evaluator_claim_summary: |
+                <brief restatement of the evaluator issue>
+              refutation_attempts:
+                - |
+                  <semantic, statistical, or block-context reason why the issue may be acceptable>
+              final_diagnosis: |
+                <why the issue is ignored or corrected>
+              affected_dimensions:
+                - idx: 0
+                  issue_type: "<issue type from evaluator or refined by you>"
+                  decision: "ignore | adjust_distribution | revise_expression"
+                  reason: |
+                    <brief reason>
+            updated_feature_plan: null
+            updated_expert_feature_code: null
+            no_change_notes: null
+
+            If correction_decision is "no_change", set:
+            reuse_previous_code: true
+            updated_feature_plan: null
+            updated_expert_feature_code: null
+            no_change_notes: |
+              <why the previous artifact should be reused>
+
+            If correction_decision is "stats_only_code_update", set:
+            reuse_previous_code: false
+            updated_feature_plan: null
+            updated_expert_feature_code:
+              implementation_status: "<executable | needs_assembler_resolution | pseudocode_with_clear_algorithm>"
+              feature_code: |
+                <updated expert-level feature function or code piece>
+              feature_outputs:
+                - name: "<feature output name>"
+                  semantic_meaning: |
+                    <semantic meaning>
+                  output_shape: "<scalar | vector | list | other conservative description>"
+                  output_scale: "<expected numeric scale or corrected statistical behavior>"
+              required_inputs:
+                - name: "<input or parameter name>"
+                  availability_class: "<scenario_layout | environment_observable | dataset_field | cached_history | default_parameter>"
+                  source: |
+                    <logical source>
+                  type_description: "<quoted plain-language type description>"
+                  meaning: |
+                    <semantic meaning>
+              dependencies:
+                imports:
+                  - "<import name, if any>"
+                cache_keys:
+                  - "<cache key, if any>"
+              unresolved_items:
+                - name: "<symbol, API detail, or integration item; use [] if none>"
+                  reason: |
+                    <why it remains unresolved>
+                  suggested_resolution: |
+                    <how assembler should resolve it>
+              scenario_reflection:
+                uses_specific_scenario: true
+                reflected_scenario_properties:
+                  - |
+                    <scenario property used>
+                reason_if_generic: |
+                  <why generic implementation is sufficient if uses_specific_scenario is false>
+              alignment_notes: |
+                <why this update preserves the previous feature plan while correcting statistics>
+              assembler_notes: |
+                <anything the assembler should know>
+            no_change_notes: null
+
+            If correction_decision is "feature_plan_and_code_update", set:
+            reuse_previous_code: false
+            updated_feature_plan:
+              feature_family_name: "<same or minimally revised feature family name>"
+              responsible_topic_application: |
+                <updated application of the responsible topic; preserve unaffected parts>
+              referenced_approaches:
+                - name: "<previous or revised reference, or none>"
+                  contribution_to_plan: |
+                    <how this reference supports the updated plan>
+              novelty_or_distinction: |
+                <how the updated plan remains distinct>
+              design_rationale:
+                - |
+                  <concise reason for the affected plan revision>
+              scenario_specific_observations:
+                - |
+                  <scenario property used by the updated sub-feature>
+              required_observables:
+                - name: "<observable or input name>"
+                  availability_class: "<scenario_layout | environment_observable | dataset_field | cached_history | default_parameter>"
+                  source: |
+                    <where the observable can logically come from>
+                  meaning: |
+                    <semantic meaning>
+                  why_needed: |
+                    <why this observable supports the revised feature>
+                  fallback_if_missing: null
+              computation_strategy: |
+                <updated high-level algorithm for the affected sub-feature>
+              expected_outputs:
+                - name: "<feature output name>"
+                  meaning: |
+                    <semantic meaning>
+                  shape: "<scalar | vector | list | other conservative description>"
+                  expected_scale: "<expected numeric scale or corrected statistical behavior>"
+              normalization_plan: |
+                <numeric representation or scaling policy if applicable; preserve prior policy unless correction requires change>
+              implementation_notes_for_code_step: |
+                <details the updated code must preserve>
+            updated_expert_feature_code:
+              implementation_status: "<executable | needs_assembler_resolution | pseudocode_with_clear_algorithm>"
+              feature_code: |
+                <updated expert-level feature function or code piece>
+              feature_outputs:
+                - name: "<feature output name>"
+                  semantic_meaning: |
+                    <semantic meaning>
+                  output_shape: "<scalar | vector | list | other conservative description>"
+                  output_scale: "<expected numeric scale or corrected statistical behavior>"
+              required_inputs:
+                - name: "<input or parameter name>"
+                  availability_class: "<scenario_layout | environment_observable | dataset_field | cached_history | default_parameter>"
+                  source: |
+                    <logical source>
+                  type_description: "<quoted plain-language type description>"
+                  meaning: |
+                    <semantic meaning>
+              dependencies:
+                imports:
+                  - "<import name, if any>"
+                cache_keys:
+                  - "<cache key, if any>"
+              unresolved_items:
+                - name: "<symbol, API detail, or integration item; use [] if none>"
+                  reason: |
+                    <why it remains unresolved>
+                  suggested_resolution: |
+                    <how assembler should resolve it>
+              scenario_reflection:
+                uses_specific_scenario: true
+                reflected_scenario_properties:
+                  - |
+                    <scenario property used>
+                reason_if_generic: |
+                  <why generic implementation is sufficient if uses_specific_scenario is false>
+              alignment_notes: |
+                <why this update is justified and how it preserves the responsible topic>
+              assembler_notes: |
+                <anything the assembler should know>
+            no_change_notes: null

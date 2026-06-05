@@ -86,11 +86,6 @@ def make_combined_encoder(core_encoder_fn, addon_encoder_fn=None):
         )
         v_core = np.asarray(v_core, dtype=np.float32)
 
-        # Keep the last core vector for diagnostics/reporting.
-        # This gives baseline/core feature statistics the same sampling source
-        # as the expert addon report.
-        core_cache["_last_v_core"] = v_core
-
         if addon_encoder_fn is None:
             return v_core
 
@@ -455,86 +450,6 @@ def tb_log_probe_report_final(writer: SummaryWriter, tls_id: str, step: int, rep
     ]
 
     writer.add_text(f"{tls_id}/probes_final/report", "\n".join(lines), step)
-
-
-def _write_feature_stats_report(
-    writer: SummaryWriter,
-    *,
-    tls_id: str,
-    step: int,
-    st: RunningFeatureStats,
-    tb_tag: str,
-    report_dir: Path,
-    file_prefix: str,
-) -> None:
-    """Write a per-dimension feature-stat report to TensorBoard and CSV.
-
-    Used for both baseline/core features and expert-addon features so phase 3
-    receives comparable statistics with the same schema.
-    """
-    rep = st.finalize()
-
-    lines = [
-        "|idx|mean|std|min|max|p5|p50|p95|dead_frac|nan|inf|",
-        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
-    ]
-    for i in range(st.dim):
-        lines.append(
-            f"|{i}|{rep['mean'][i]:.4g}|{rep['std'][i]:.4g}|{rep['min'][i]:.4g}|{rep['max'][i]:.4g}"
-            f"|{rep.get('p5',[0]*st.dim)[i]:.4g}|{rep.get('p50',[0]*st.dim)[i]:.4g}|{rep.get('p95',[0]*st.dim)[i]:.4g}"
-            f"|{rep['frac_abs_lt_eps'][i]:.3f}|{int(rep['nan'][i])}|{int(rep['inf'][i])}|"
-        )
-    writer.add_text(f"{tls_id}/{tb_tag}/report", "\n".join(lines), step)
-
-    report_dir.mkdir(parents=True, exist_ok=True)
-    print(f"saving {file_prefix} stats to : {report_dir}")
-    csv_path = report_dir / f"{tls_id}_{file_prefix}_step{step}.csv"
-
-    with csv_path.open("w", newline="", encoding="utf-8") as f:
-        writer_csv = csv.DictWriter(
-            f,
-            fieldnames=[
-                "tls_id",
-                "step",
-                "idx",
-                "mean",
-                "std",
-                "min",
-                "max",
-                "p5",
-                "p50",
-                "p95",
-                "dead_frac",
-                "nan",
-                "inf",
-                "n_samples",
-            ],
-        )
-        writer_csv.writeheader()
-
-        p5 = rep.get("p5", [0] * st.dim)
-        p50 = rep.get("p50", [0] * st.dim)
-        p95 = rep.get("p95", [0] * st.dim)
-
-        for i in range(st.dim):
-            writer_csv.writerow(
-                {
-                    "tls_id": tls_id,
-                    "step": int(step),
-                    "idx": int(i),
-                    "mean": float(rep["mean"][i]),
-                    "std": float(rep["std"][i]),
-                    "min": float(rep["min"][i]),
-                    "max": float(rep["max"][i]),
-                    "p5": float(p5[i]),
-                    "p50": float(p50[i]),
-                    "p95": float(p95[i]),
-                    "dead_frac": float(rep["frac_abs_lt_eps"][i]),
-                    "nan": int(rep["nan"][i]),
-                    "inf": int(rep["inf"][i]),
-                    "n_samples": int(rep["n"]),
-                }
-            )
 
 
 # ---------------------------------------------------------------------------
@@ -911,7 +826,6 @@ def run_ppo_tsc(
     print(f"[run_ppo_tsc] encoder core='{core_encoder_name}', " f"addon='{addon_encoder_name}'")
     time.sleep(4)
     expert_stats: dict[RunningFeatureStats] = {}  # tls_id -> RunningFeatureStats
-    core_stats: dict[RunningFeatureStats] = {}  # tls_id -> RunningFeatureStats for baseline/core encoder
     expert_names = {}  # tls_id -> list[str] (optional)
 
     # NEW: expert feature report specific trackers and dims
@@ -1007,12 +921,6 @@ def run_ppo_tsc(
                         cache=encoder_cache[tls_id],
                     ).astype(np.float32)
                     state_dim = int(s0.shape[0])
-                    v_core0 = encoder_cache[tls_id].get("_enc_core", {}).get("_last_v_core", None)
-                    if v_core0 is not None and tls_id not in core_stats:
-                        core_dim0 = int(np.asarray(v_core0).shape[0])
-                        core_stats[tls_id] = RunningFeatureStats(
-                            core_dim0, eps=1e-3, reservoir_k=2048, bounded_01=True
-                        )
                     # action_dim = int(get_phase_count(tls_id))
 
                     # NEW (major greens only)
@@ -1308,15 +1216,6 @@ def run_ppo_tsc(
                             scene_stats=scene_stats,
                             wait_ref_s=wait_ref_s,
                         ).astype(np.float32)
-
-                        v_core = encoder_cache[tls_id].get("_enc_core", {}).get("_last_v_core", None)
-                        if v_core is not None:
-                            if tls_id not in core_stats:
-                                core_dim = int(np.asarray(v_core).shape[0])
-                                core_stats[tls_id] = RunningFeatureStats(
-                                    core_dim, eps=1e-3, reservoir_k=2048, bounded_01=True
-                                )
-                            core_stats[tls_id].update(v_core)
 
                         if has_expert_addon:
                             v_sem = encoder_cache[tls_id].get("_enc_addon", {}).get("_last_v_sem", None)
@@ -1652,31 +1551,90 @@ def run_ppo_tsc(
         if deadlock_flag:
             writer.add_scalar("global/deadlock_time_s", float(deadlock_t), ep)
         # -----------------------------------------------
-    print(f">> collected baseline/core stats: {core_stats}")
-    for tls_id, st in core_stats.items():
-        step = int(tb_step_decision.get(tls_id, 0))
-        _write_feature_stats_report(
-            writer,
-            tls_id=tls_id,
-            step=step,
-            st=st,
-            tb_tag="baseline_features",
-            report_dir=Path(tb_logdir) / run_name / "baseline_feature_reports",
-            file_prefix="baseline_features",
-        )
-
     print(f">> collected expert stats: {expert_stats}")
     for tls_id, st in expert_stats.items():
+        rep = st.finalize()
         step = int(tb_step_decision.get(tls_id, 0))
-        _write_feature_stats_report(
-            writer,
-            tls_id=tls_id,
-            step=step,
-            st=st,
-            tb_tag="expert_features",
-            report_dir=Path(tb_logdir) / run_name / "expert_feature_reports",
-            file_prefix="expert_features",
-        )
+        # small set of scalars (avoid TB clutter)
+        # writer.add_scalar(f"{tls_id}/expert_features/mean_std", float(np.mean(rep["std"])), step)
+        # writer.add_scalar(f"{tls_id}/expert_features/max_std", float(np.max(rep["std"])), step)
+        # writer.add_scalar(
+        #     f"{tls_id}/expert_features/mean_dead_frac",
+        #     float(np.mean(rep["frac_abs_lt_eps"])),
+        #     step,
+        # )
+        # writer.add_scalar(
+        #     f"{tls_id}/expert_features/max_dead_frac",
+        #     float(np.max(rep["frac_abs_lt_eps"])),
+        #     step,
+        # )
+        # writer.add_scalar(f"{tls_id}/expert_features/n_samples", float(rep["n"]), step)
+
+        # detailed per-dim report as text (markdown table)
+        lines = [
+            "|idx|mean|std|min|max|p5|p50|p95|dead_frac|nan|inf|",
+            "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+        for i in range(st.dim):
+            lines.append(
+                f"|{i}|{rep['mean'][i]:.4g}|{rep['std'][i]:.4g}|{rep['min'][i]:.4g}|{rep['max'][i]:.4g}"
+                f"|{rep.get('p5',[0]*st.dim)[i]:.4g}|{rep.get('p50',[0]*st.dim)[i]:.4g}|{rep.get('p95',[0]*st.dim)[i]:.4g}"
+                f"|{rep['frac_abs_lt_eps'][i]:.3f}|{int(rep['nan'][i])}|{int(rep['inf'][i])}|"
+            )
+        writer.add_text(f"{tls_id}/expert_features/report", "\n".join(lines), step)
+
+        # log the report explicitly
+        report_dir = Path(tb_logdir) / run_name / "expert_feature_reports"
+        report_dir.mkdir(parents=True, exist_ok=True)
+        print(f"saving feature stats to : {report_dir}")
+
+        csv_path = report_dir / f"{tls_id}_expert_features_step{step}.csv"
+
+        with csv_path.open("w", newline="", encoding="utf-8") as f:
+            writer_csv = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "tls_id",
+                    "step",
+                    "idx",
+                    "mean",
+                    "std",
+                    "min",
+                    "max",
+                    "p5",
+                    "p50",
+                    "p95",
+                    "dead_frac",
+                    "nan",
+                    "inf",
+                    "n_samples",
+                ],
+            )
+            writer_csv.writeheader()
+
+            p5 = rep.get("p5", [0] * st.dim)
+            p50 = rep.get("p50", [0] * st.dim)
+            p95 = rep.get("p95", [0] * st.dim)
+
+            for i in range(st.dim):
+                writer_csv.writerow(
+                    {
+                        "tls_id": tls_id,
+                        "step": int(step),
+                        "idx": int(i),
+                        "mean": float(rep["mean"][i]),
+                        "std": float(rep["std"][i]),
+                        "min": float(rep["min"][i]),
+                        "max": float(rep["max"][i]),
+                        "p5": float(p5[i]),
+                        "p50": float(p50[i]),
+                        "p95": float(p95[i]),
+                        "dead_frac": float(rep["frac_abs_lt_eps"][i]),
+                        "nan": int(rep["nan"][i]),
+                        "inf": int(rep["inf"][i]),
+                        "n_samples": int(rep["n"]),
+                    }
+                )
 
     # Final Proposal 1 report
     tb_log_proposal1_expert_adv_corr_final(

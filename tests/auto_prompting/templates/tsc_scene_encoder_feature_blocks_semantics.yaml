@@ -1,0 +1,91 @@
+# Traffic Signal Control scene encoder feature block map
+# Source: scene_encoder.py
+# Dimension symbols:
+#   L = number of controlled incoming lanes (scene_stats.num_lanes)
+#   P = number of traffic-light phases (signal_context.num_phases)
+#   M = number of major green phases (len(signal_context.major_phases))
+# Total encoded vector length: 5*L + P + M
+# Lane order is canonical and cached: incoming lanes sorted by (edge ID, lane ID).
+
+"0..(4*L - 1)":
+  description: "Per-lane normalized traffic condition block. For each lane i in canonical lane order, this block stores four bounded features at indices 4*i through 4*i+3: queue occupancy, vehicle-count occupancy, moving-speed ratio, and stopped-wait ratio."
+  dimension: "4*L"
+  per_lane_layout:
+    "4*i + 0":
+      name: "queue_ratio_norm"
+      meaning: "Softly saturated queued-vehicle occupancy for lane i. Queued vehicles are those with speed <= stopped_speed_threshold."
+      essential_process:
+        - "Count stopped/queued vehicles on the lane."
+        - "Estimate lane capacity as max(1.0, lane_length_m / veh_equiv_len_m)."
+        - "Compute raw queue occupancy as queue_count / lane_capacity_veh."
+        - "Apply _soft_sat(raw_occupancy, sat=clip_occ) to bound the feature."
+    "4*i + 1":
+      name: "count_ratio_norm"
+      meaning: "Softly saturated total vehicle-count occupancy for lane i."
+      essential_process:
+        - "Count all vehicles observed on the lane in the current simulation step."
+        - "Reuse lane_capacity_veh = max(1.0, lane_length_m / veh_equiv_len_m)."
+        - "Compute raw count occupancy as vehicle_count / lane_capacity_veh."
+        - "Apply _soft_sat(raw_occupancy, sat=clip_occ) to bound the feature."
+    "4*i + 2":
+      name: "speed_norm"
+      meaning: "Mean moving-vehicle speed normalized by the lane speed limit. Vehicles with speed > moving_speed_threshold contribute to the mean; if there are no moving vehicles, the mean is 0."
+      essential_process:
+        - "Average speeds only over vehicles with speed > moving_speed_threshold."
+        - "Divide the mean moving speed by lane max speed."
+        - "Clip the ratio to [0, 1] using _clip01_unit."
+    "4*i + 3":
+      name: "wait_norm"
+      meaning: "Softly saturated mean waiting time for stopped/queued vehicles on lane i. If no vehicles are queued, the mean wait is 0."
+      essential_process:
+        - "Collect vehicle waiting times only for vehicles with speed <= stopped_speed_threshold."
+        - "Average waiting time over stopped/queued vehicles."
+        - "Normalize by wait_ref_s."
+        - "Apply _soft_sat(mean_wait_stopped_s / wait_ref_s, sat=1.0)."
+  smoothing_or_bounding: "No rolling or EMA smoothing is applied in this block. Bounding is done through soft saturation for occupancy/wait features and hard clipping for speed_norm."
+  dtype: "float32"
+
+"4*L..(5*L - 1)":
+  description: "Per-lane current green-signal availability block. For each lane i, this block stores one binary flag indicating whether any controlled signal index associated with that lane is currently green."
+  dimension: "L"
+  per_lane_layout:
+    "4*L + i":
+      name: "is_green"
+      meaning: "1.0 if the current red/yellow/green state for at least one signal index mapped to lane i is 'G' or 'g'; otherwise 0.0."
+      essential_process:
+        - "Build or reuse a cached lane-to-signal-index mapping from trafficlight.getControlledLinks(tls_id)."
+        - "Read the current signal state string with trafficlight.getRedYellowGreenState(tls_id)."
+        - "Set the flag to 1.0 if any mapped signal index is green ('G' or 'g'); otherwise set 0.0."
+  smoothing_or_bounding: "No smoothing or normalization is applied; this is a binary context feature."
+  dtype: "float32"
+
+"5*L..(5*L + P - 1)":
+  description: "Current traffic-light phase one-hot block. This encodes the active phase index among all P phases in the current traffic-light program."
+  dimension: "P"
+  layout:
+    "5*L + p":
+      name: "phase_one_hot[p]"
+      meaning: "1.0 when p equals the current phase index and the phase index is valid; otherwise 0.0."
+      essential_process:
+        - "Retrieve the current phase index with trafficlight.getPhase(tls_id)."
+        - "Create a zero vector of length P, where P is len(plan.phases)."
+        - "Set the current phase position to 1.0 when 0 <= current_phase < P."
+  smoothing_or_bounding: "No smoothing or continuous normalization is applied; this is a categorical one-hot feature."
+  dtype: "float32"
+
+"(5*L + P)..(5*L + P + M - 1)":
+  description: "Major-phase starvation / time-since-service block. For each major green phase m, this block stores a bounded normalized duration since that phase was last active."
+  dimension: "M"
+  layout:
+    "5*L + P + m":
+      name: "time_since_major_green_norm[m]"
+      meaning: "Softly saturated time since major green phase m was last served. Larger values indicate a longer unserved duration for that major phase."
+      essential_process:
+        - "Use get_tls_phase_plan(tls_id, cache, min_major_green_s) to identify major green phases for the current program."
+        - "Maintain a cached last-served simulation timestamp for each major phase, resetting the cache when the traffic-light program changes."
+        - "When the current phase is a major phase, update its last-served timestamp to the current simulation time."
+        - "For each major phase, compute dt = current_sim_time - last_served_time."
+        - "Normalize dt by since_served_ref_s."
+        - "Apply _soft_sat(dt / since_served_ref_s, sat=1.0)."
+  smoothing_or_bounding: "No statistical smoothing is applied. The feature is temporally stateful through cached last-served timestamps and bounded through soft saturation."
+  dtype: "float32"

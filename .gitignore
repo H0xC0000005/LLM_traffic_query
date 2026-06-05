@@ -1,7 +1,7 @@
 /.vscode
 /__pycache__
 /plots
-tensorboard_logs
+**/tensorboard_logs_all
 tsb_*
 models_*
 *.pyc
