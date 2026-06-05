@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
+import csv
 import numpy as np
 
 import libsumo as traci
@@ -96,6 +97,10 @@ def make_combined_encoder(core_encoder_fn, addon_encoder_fn=None):
             **kwargs,
         )
         v_add = np.asarray(v_add, dtype=np.float32)
+
+        # Keep the last addon vector for diagnostics/reporting.
+        # The active combined encoder uses "_enc_addon", not the older "_enc_sem".
+        addon_cache["_last_v_sem"] = v_add
 
         return np.concatenate([v_core, v_add], axis=0)
 
@@ -801,21 +806,19 @@ def run_ppo_tsc(
         min_major_green_s=action_hold_s,
     )
 
+    addon_encoder_name_norm = str(addon_encoder_name).lower().strip()
+
     addon_encoder_fn = None
-    if str(addon_encoder_name).lower() not in {"", " ", "none", "null"}:
+    if addon_encoder_name_norm not in {"", "none", "null"}:
         addon_encoder_fn = resolve_encoder(
             addon_encoder_name,
             min_major_green_s=action_hold_s,
         )
-    # if use_expert_features:
-    #     # encoder_fn = encode_tsc_state_vector_combined
-    #     encoder_fn = make_combined_encoder(core_encoder_fn)
-    #     print(f"[run_ppo_tsc] Using encoder='{encoder_name}' + expert features.")
-    #     time.sleep(3)  # allow user to see the print
-    # else:
-    #     encoder_fn = encode_tsc_state_vector_bounded_v2
-    #     print(f"[run_ppo_tsc] Using encoder='{encoder_name}' only.")
-    #     time.sleep(3)  # allow user to see the print
+
+    # Expert feature diagnostics should follow the actual addon encoder,
+    # not the older --use-expert-features flag.
+    has_expert_addon = addon_encoder_name_norm == "expert"
+
     encoder_fn = make_combined_encoder(
         core_encoder_fn=core_encoder_fn,
         addon_encoder_fn=addon_encoder_fn,
@@ -922,8 +925,8 @@ def run_ppo_tsc(
 
                     # NEW (major greens only)
                     action_dim = int(tls_major_action_dim(tls_id, encoder_cache[tls_id]))
-                    if use_expert_features:
-                        v_sem0 = encoder_cache[tls_id].get("_enc_sem", {}).get("_last_v_sem", None)
+                    if has_expert_addon:
+                        v_sem0 = encoder_cache[tls_id].get("_enc_addon", {}).get("_last_v_sem", None)
                         if v_sem0 is not None and tls_id not in expert_stats:
                             sem_dim = int(np.asarray(v_sem0).shape[0])
                             expert_stats[tls_id] = RunningFeatureStats(
@@ -1214,9 +1217,23 @@ def run_ppo_tsc(
                             wait_ref_s=wait_ref_s,
                         ).astype(np.float32)
 
-                        if use_expert_features:
-                            v_sem = encoder_cache[tls_id].get("_enc_sem", {}).get("_last_v_sem", None)
+                        if has_expert_addon:
+                            v_sem = encoder_cache[tls_id].get("_enc_addon", {}).get("_last_v_sem", None)
                             if v_sem is not None:
+                                if tls_id not in expert_stats:
+                                    sem_dim = int(np.asarray(v_sem).shape[0])
+                                    expert_stats[tls_id] = RunningFeatureStats(
+                                        sem_dim, eps=1e-3, reservoir_k=2048, bounded_01=True
+                                    )
+                                    expert_sem_dim[tls_id] = sem_dim
+
+                                    core_dim = int(max(0, cur_state.shape[0] - sem_dim))
+                                    expert_adv_corr_trackers[tls_id] = RunningExpertAdvPearson(sem_dim=sem_dim)
+                                    expert_core_xcorr_trackers[tls_id] = RunningExpertCoreCrossCorr(
+                                        sem_dim=sem_dim,
+                                        core_dim=core_dim,
+                                    )
+
                                 expert_stats[tls_id].update(v_sem)
 
                         lane_ids = list(scene_stats.lane_ids)
@@ -1341,7 +1358,7 @@ def run_ppo_tsc(
                                 agent=agents[tls_id],
                                 action_dim=agents[tls_id].action_dim,
                             )
-                            if use_expert_features and tls_id in expert_sem_dim:
+                            if has_expert_addon and tls_id in expert_sem_dim:
                                 sem_dim = int(expert_sem_dim[tls_id])
 
                                 log_hm, hm_event_idx = _next_heatmap_event(
@@ -1534,7 +1551,7 @@ def run_ppo_tsc(
         if deadlock_flag:
             writer.add_scalar("global/deadlock_time_s", float(deadlock_t), ep)
         # -----------------------------------------------
-
+    print(f">> collected expert stats: {expert_stats}")
     for tls_id, st in expert_stats.items():
         rep = st.finalize()
         step = int(tb_step_decision.get(tls_id, 0))
@@ -1565,6 +1582,59 @@ def run_ppo_tsc(
                 f"|{rep['frac_abs_lt_eps'][i]:.3f}|{int(rep['nan'][i])}|{int(rep['inf'][i])}|"
             )
         writer.add_text(f"{tls_id}/expert_features/report", "\n".join(lines), step)
+
+        # log the report explicitly
+        report_dir = Path(tb_logdir) / run_name / "expert_feature_reports"
+        report_dir.mkdir(parents=True, exist_ok=True)
+        print(f"saving feature stats to : {report_dir}")
+
+        csv_path = report_dir / f"{tls_id}_expert_features_step{step}.csv"
+
+        with csv_path.open("w", newline="", encoding="utf-8") as f:
+            writer_csv = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "tls_id",
+                    "step",
+                    "idx",
+                    "mean",
+                    "std",
+                    "min",
+                    "max",
+                    "p5",
+                    "p50",
+                    "p95",
+                    "dead_frac",
+                    "nan",
+                    "inf",
+                    "n_samples",
+                ],
+            )
+            writer_csv.writeheader()
+
+            p5 = rep.get("p5", [0] * st.dim)
+            p50 = rep.get("p50", [0] * st.dim)
+            p95 = rep.get("p95", [0] * st.dim)
+
+            for i in range(st.dim):
+                writer_csv.writerow(
+                    {
+                        "tls_id": tls_id,
+                        "step": int(step),
+                        "idx": int(i),
+                        "mean": float(rep["mean"][i]),
+                        "std": float(rep["std"][i]),
+                        "min": float(rep["min"][i]),
+                        "max": float(rep["max"][i]),
+                        "p5": float(p5[i]),
+                        "p50": float(p50[i]),
+                        "p95": float(p95[i]),
+                        "dead_frac": float(rep["frac_abs_lt_eps"][i]),
+                        "nan": int(rep["nan"][i]),
+                        "inf": int(rep["inf"][i]),
+                        "n_samples": int(rep["n"]),
+                    }
+                )
 
     # Final Proposal 1 report
     tb_log_proposal1_expert_adv_corr_final(
