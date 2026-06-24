@@ -1,0 +1,211 @@
+schema_version: task_variables.v1
+task_id: energy_forecasting
+variables:
+  task_name: building energy consumption forecasting
+
+  general_prior: |
+    The task is to produce effective supplementary feature representations for forecasting civilian-building energy consumption.
+    Each row represents a timestamped building-meter observation with building metadata, nearby weather readings, and calendar context.
+    The prediction target is a future energy meter reading, so the task is temporal forecasting rather than random-timestep interpolation or in-filling.
+    Buildings are anonymous: building identity is not available, and feature design must rely on the supplied building properties, meter type, weather, time, and other listed observables.
+    You are working with peer experts to analyze distinct semantic factors and produce complementary feature families for this forecasting task.
+
+  scenario_prior: |
+    The data is an offline supervised tabular dataset ordered in time.
+    Training and evaluation are separated chronologically: earlier historical observations are used to predict a later unseen time window.
+    Future evaluation data may differ from historical training data because of seasonal change, operational change, usage-pattern change, weather-regime change, or other temporal drift.
+    Feature quality should therefore be judged by whether the feature remains meaningful and computable for future rows, not only by how well it explains historical rows.
+
+    The runtime input is a pandas DataFrame containing the available records and the exact columns described in the scenario instance.
+    The feature extractor must preserve row count, row order, and index alignment.
+    Timestamp may be used to derive calendar or cyclic features but should not be returned directly as a model feature unless the contract explicitly requires it.
+
+    Prevent temporal and target leakage.
+    A feature for a row must not depend on observations from a later timestamp.
+    Centered windows, future shifts, full-dataset aggregates, and statistics fitted using future/evaluation rows are not allowed.
+    Same-row deterministic transformations are allowed.
+    Historical, rolling, expanding, grouped, or fitted statistics are allowed only when they are computed strictly from information available before the row being transformed and when the grouping keys themselves are available at inference time.
+
+    The target column is `meter_reading` and is available only for historical training rows.
+    Directly using the row's target value as an engineered feature is forbidden.
+    If an expert proposes target-dependent fitted state, it must use an explicit fit/transform protocol: target information may be consumed only during a declared training-only fit step, the fitted state must be stored in the external cache, and transform-time features must be computable without `meter_reading`.
+    If such separation cannot be implemented unambiguously, the feature must remain target-independent.
+
+    External constants, reference parameters, lookup tables, or pretrained analytic components may be used only when they are included as function defaults or stored in the supplied cache so that the final feature extractor is self-contained at runtime.
+    Any cache state must be documented, semantically named, and reusable on future rows without refitting on evaluation data.
+
+  scenario_instance: |
+    The group is analyzing a building-energy forecasting dataset with the following columns:
+
+    - `meter`: meter type identifier; categorical code with 0=electricity, 1=chilled water, 2=steam, and 3=hot water.
+    - `timestamp`: hourly observation timestamp at one-hour granularity; retained for chronological splitting and temporal derivation, then normally excluded from model inputs.
+    - `primary_use`: building primary activity class, such as Education or Office; categorical string.
+    - `square_feet`: gross building floor area in square feet; continuous numeric and may be missing.
+    - `year_built`: building construction or opening year; numeric/integer-like and may be missing.
+    - `floor_count`: number of floors; count-valued numeric and may be missing.
+    - `air_temperature`: outdoor air temperature in degrees Celsius; numeric.
+    - `cloud_coverage`: sky cloud cover, typically 0 to 8 oktas; numeric.
+    - `dew_temperature`: outdoor dew-point temperature in degrees Celsius; numeric.
+    - `precip_depth_1_hr`: one-hour precipitation depth in millimetres; numeric.
+    - `sea_level_pressure`: sea-level atmospheric pressure in millibars/hectopascals; numeric.
+    - `wind_direction`: wind bearing in degrees on a 0 to 360 compass scale; numeric and circular.
+    - `wind_speed`: wind speed in metres per second; numeric.
+    - `IsHoliday`: country-specific holiday indicator derived from site location and timestamp; binary 0/1.
+    - `day`: day of month, values 1 to 31; categorical.
+    - `hour`: hour of day, values 0 to 23; categorical.
+    - `weekday`: day of week, values 0 to 6 with Monday=0; categorical.
+    - `is_day_off_or_holiday`: boolean flag for weekends or holidays.
+    - `year_built_cat`: categorical copy of `year_built` using observed build-year labels.
+    - `meter_reading`: train-only continuous regression target, represented as log1p-transformed energy consumption in kWh-equivalent units.
+
+    Building identity is not available.
+    Only the listed columns and explicitly provided external/cache state may be assumed.
+    Weather missing values may already have been imputed by preprocessing, but generated code should still behave safely if missing values remain.
+
+  feature_plan_prior: |-
+    The feature plan should explain how the expert's final semantic topic can be operationalized for the given building-energy forecasting dataset.
+    The plan should have either an important logical relationship to future energy demand or a plausible relationship to forecasting robustness under temporal drift.
+    The expert should actively determine how its responsible topic can be represented using the available dataset fields, leakage-safe historical information, cacheable training-only state, or explicit default parameters.
+
+    If retrieval tools, external references, literature snippets, engineering reports, standards, or established analytic models are available, use them to support the feature plan and summarize their contribution.
+    If no external reference is available, rely on the supplied task and scenario prior and explicitly state that no external reference was used.
+
+    The plan should identify the closest available observables or defensible proxies for the responsible topic.
+    It must not depend on building identity, unavailable future data, or arbitrary fields outside the manifest.
+    If historical aggregation or fitted state is proposed, the plan must state the chronological fit/transform boundary, cache content, grouping keys, and inference-time fallback.
+    Direct target-derived row features are forbidden.
+
+    The feature family should be semantically coherent and specific enough to represent one clean factor or one tightly related group of factors.
+    It may be useful only for a subset of building types, meter types, weather regimes, or calendar conditions when that limitation is made explicit.
+    Outputs should be quantifiable for each input row and should preserve the DataFrame index.
+    Prefer a compact feature family over an unnecessarily large expansion; approximately two to five outputs is a useful default when the semantics permit it, but it is not a hard limit.
+
+    The plan should consider numeric representation deliberately.
+    Continuous physical quantities, bounded scores, ratios, cyclic values, categorical indicators, and missingness indicators may require different representations.
+    Avoid gratuitously sparse, unstable, non-finite, or confusing outputs.
+    Explain any clipping, saturation, logarithm, ratio, category encoding, or normalization in semantic terms rather than applying it mechanically.
+
+  expert_code_synthesis_prior: |-
+    Translate the scenario-specific feature plan into an expert-level procedural Python feature function or code piece.
+    The function should implement only the expert's own coherent feature family; the assembler will later combine all expert code pieces into one monolithic extractor.
+
+    The runtime data source is a pandas DataFrame.
+    Use only columns listed in the scenario instance and explicitly supplied defaults/cache state.
+    Do not modify the input DataFrame in place.
+    Create a new output DataFrame with the same index and exactly the same number and order of rows.
+    Return only newly engineered feature columns; do not append or copy original columns into the output.
+    Use deterministic, descriptive, collision-resistant output column names.
+
+    Prevent leakage in code.
+    Do not use future rows, centered windows, negative shifts, full-data statistics, or evaluation rows to construct historical features.
+    Do not directly use `meter_reading` as an output feature or same-row input.
+    A target-dependent model or statistic is permitted only with an explicit `fit=True` training-only path that stores fitted state in cache and a `fit=False` transform path that never reads the target.
+    If the expert cannot implement this separation safely, use a target-independent construction.
+
+    Handle numeric edge cases conservatively.
+    Use safe division, finite fallbacks, and explicit missing-value handling.
+    Replace or prevent NaN and positive/negative infinity in numeric outputs unless a categorical missing value is intentionally documented and supported.
+    Preserve temporal ordering when computing historical state.
+    Do not silently infer unavailable building identity or use row position as a surrogate identity.
+
+    Numerical values, categorical values, or a compact DataFrame containing a coherent mixture are allowed.
+    Document each output column's semantics, expected scale/type, and temporal availability.
+    Prefer procedural code over object-oriented code.
+    If an implementation detail must be resolved by the assembler, describe the unresolved item, its semantic source, and a safe resolution strategy in `assembler_notes`.
+
+  expert_feature_function_contract: |
+    Produce a Python function or code piece following this style:
+
+    def <feature_name_as_function_name>(
+        df: pd.DataFrame,
+        *,
+        cache: dict | None = None,
+        fit: bool = False,
+        <hyperparameters_with_defaults_only>,
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        """
+        <summary of algorithm, no more than 50 words>
+        <I/O and parameter documentation>
+        <output-column layout and semantic meaning>
+        <fit/transform and cache usage documentation>
+        """
+        <body>
+
+    The returned YAML field `feature_code` must contain the code as a block string.
+    The function must return a newly created pandas DataFrame containing only the expert's engineered feature columns.
+    Its index and row count must exactly match `df`.
+    The function must not modify `df` in place or return original input columns.
+
+    `fit=False` is the safe default.
+    When `fit=False`, the function must not read `meter_reading`.
+    If `fit=True` is supported, target-dependent fitting must use only historical training rows and store all fitted state in the supplied cache; later calls with `fit=False` must work without the target column.
+    The code should remain target-independent if a correct fit/transform protocol is unnecessary or ambiguous.
+
+    Only true hyperparameters, explicit external constants, and compatibility `**kwargs` may appear beyond `df`, `cache`, and `fit`.
+    If details require assembler-level integration, document them in `assembler_notes` rather than hiding unresolved dependencies.
+
+  assembler_prior: |-
+    You are assembling expert-generated feature functions for an offline building-energy forecasting dataset.
+    Combine the expert code pieces into one procedural Python function while preserving each expert's semantic algorithm and the final source-of-truth feature plans.
+
+    The final function receives a pandas DataFrame and an optional external cache.
+    It should resolve reusable parsing, safe numeric utilities, chronological transformations, and cache handling centrally when multiple experts need similar logic.
+    Merge duplicated helper code and truly duplicate feature outputs when doing so preserves expert semantics and traceability.
+    Do not merge merely correlated but semantically distinct features.
+
+    Preserve forecasting validity.
+    Do not introduce future leakage, full-dataset fitting, centered windows, evaluation-time refitting, or direct target-derived output columns during assembly.
+    If an expert uses an explicit training-only fit path, preserve the fit/transform boundary and ensure transform mode works without `meter_reading`.
+    Do not infer building identity or depend on unavailable columns.
+
+    The final output must be a newly created feature-only DataFrame with the same index, row count, and row order as the input.
+    Do not modify the caller's DataFrame.
+    All output column names must be unique, descriptive, and stable.
+    Numeric outputs must be finite after documented missing-value and edge-case handling.
+    Categorical outputs must have a stable representation compatible with pandas tabular workflows.
+
+    The external cache is managed by the caller.
+    Do not clear it inside the function.
+    Use semantically namespaced keys and document whether each cached item is static configuration, training-fitted state, or chronological transform state.
+    The final function must not depend on unresolved external objects or caller-supplied observable structures beyond the DataFrame, cache, explicit fit mode, and true hyperparameters with defaults.
+
+  assembler_function_contract: |-
+    Generate a single combined Python function with this signature style:
+
+    def extract_expert_features(
+        df: pd.DataFrame,
+        *,
+        cache: dict | None = None,
+        fit: bool = False,
+        <hyperparameters_with_defaults_only>,
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        """
+        <summary of algorithm, no more than 100 words>
+        <I/O and parameter documentation>
+        <output-column layout and expert-to-feature mapping summary>
+        <fit/transform and cache usage documentation>
+        """
+        <body>
+
+    The caller will provide `df`, may provide the external cache, and may explicitly set `fit`.
+    `**kwargs` is for caller compatibility only; the core feature computation must not depend on hidden required values in `**kwargs`.
+    Only true hyperparameters or fixed external constants with safe defaults may be exposed as additional keyword parameters.
+
+    The default `fit=False` call must work without `meter_reading`.
+    Direct target-derived output features are forbidden.
+    If `fit=True` is implemented, target-dependent state may be learned only from historical training rows, must be stored in cache, and must be reusable in later `fit=False` calls without target access.
+    Never infer the chronological split from future information or fit on the complete train-plus-evaluation DataFrame.
+
+    The function must create and return a new pandas DataFrame containing only engineered feature columns.
+    It must preserve the input index, row count, and row order exactly.
+    It must not mutate `df`, append original columns, return the target, or return timestamp directly as a raw model feature.
+    Output column names must be unique and deterministic.
+    Numeric outputs must be finite after safe handling of missing values, zero denominators, overflow, and invalid operations.
+
+    The final YAML response must include `expert_feature_mapping`.
+    Mapping indices are inclusive at `start` and exclusive at `end`, and they must correspond to the final deterministic output-column order.
+    Each mapped dimension should identify the output column name, semantic meaning, and expected numeric scale or categorical representation so later feedback can be routed to the responsible expert.
+
+  external_reference_context_yaml: '[]'

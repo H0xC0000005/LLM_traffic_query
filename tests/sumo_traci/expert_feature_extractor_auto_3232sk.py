@@ -261,7 +261,6 @@ def tsc_isolated_intersection_feature_vector(
 
         # Deterministic ordering of inbound lanes by (leg, lane_id)
         legs_order = ["N", "E", "S", "W"]
-
         def leg_rank(leg: str) -> int:
             return legs_order.index(leg) if leg in legs_order else len(legs_order)
 
@@ -392,7 +391,11 @@ def tsc_isolated_intersection_feature_vector(
         and movement-demand features (slightly adapted to use local args).
         """
         # Identify inbound lanes and build index mapping
-        inbound_lane_ids = [lid for lid, meta in lane_metadata_local.items() if meta.get("is_inbound", False)]
+        inbound_lane_ids = [
+            lid
+            for lid, meta in lane_metadata_local.items()
+            if meta.get("is_inbound", False)
+        ]
         if not inbound_lane_ids:
             return {"density": [], "mean_speed": [], "movement_weights": []}
 
@@ -407,7 +410,9 @@ def tsc_isolated_intersection_feature_vector(
         movement_counts = np.zeros((num_lanes, len(movements_order)), dtype=float)
 
         bin_width = max_detection_distance_local / float(max(num_distance_bins_local, 1))
-        lane_index_map: Dict[str, int] = {lid: idx for idx, lid in enumerate(inbound_lane_ids)}
+        lane_index_map: Dict[str, int] = {
+            lid: idx for idx, lid in enumerate(inbound_lane_ids)
+        }
 
         # Aggregate vehicles
         for v in vehicles_local:
@@ -449,7 +454,9 @@ def tsc_isolated_intersection_feature_vector(
 
         mean_speed = np.zeros_like(speed_sums)
         nonzero_mask = speed_counts > 0.0
-        mean_speed[nonzero_mask] = speed_sums[nonzero_mask] / speed_counts[nonzero_mask]
+        mean_speed[nonzero_mask] = (
+            speed_sums[nonzero_mask] / speed_counts[nonzero_mask]
+        )
         mean_speed = np.clip(mean_speed, 0.0, 1.5)
 
         if ref_max_veh_per_lane_local <= 0.0:
@@ -465,7 +472,9 @@ def tsc_isolated_intersection_feature_vector(
                 0.0,
             )
 
-        movement_features = np.concatenate([movement_norm_counts, movement_props], axis=1)
+        movement_features = np.concatenate(
+            [movement_norm_counts, movement_props], axis=1
+        )
 
         return {
             "density": density.flatten(order="C").tolist(),
@@ -523,7 +532,9 @@ def tsc_isolated_intersection_feature_vector(
             if speed <= speed_threshold:
                 continue
 
-            arrival_time = remaining_distance / speed if speed > 0.0 else max_prediction_time + 1.0
+            arrival_time = (
+                remaining_distance / speed if speed > 0.0 else max_prediction_time + 1.0
+            )
             if arrival_time < 0.0 or arrival_time > max_prediction_time:
                 continue
 
@@ -554,7 +565,9 @@ def tsc_isolated_intersection_feature_vector(
                 if not times:
                     continue
 
-                headways = [times[i] - times[i - 1] for i in range(1, len(times))]
+                headways = [
+                    times[i] - times[i - 1] for i in range(1, len(times))
+                ]
 
                 platoon_sizes: List[int] = []
                 current_platoon_size = 1
@@ -616,16 +629,23 @@ def tsc_isolated_intersection_feature_vector(
         is_in_transition = 1 if current_service_phase is None else 0
 
         if reference_green_duration_local <= 0.0:
-            reference_green_duration_local = max(10.0, max(raw_phase_durations) if raw_phase_durations else 10.0)
+            reference_green_duration_local = max(
+                10.0, max(raw_phase_durations) if raw_phase_durations else 10.0
+            )
         norm_elapsed_raw = max(elapsed_time_in_current_raw_phase, 0.0) / reference_green_duration_local
         if norm_elapsed_raw > 2.0:
             norm_elapsed_raw = 2.0
 
-        if current_service_phase is not None and 0 <= current_service_phase < num_service:
+        if (
+            current_service_phase is not None
+            and 0 <= current_service_phase < num_service
+        ):
             min_green = minimum_service_green_per_phase[current_service_phase]
             if min_green < 0.0:
                 min_green = 0.0
-            remaining_min_green = max(min_green - elapsed_time_in_current_service_phase, 0.0)
+            remaining_min_green = max(
+                min_green - elapsed_time_in_current_service_phase, 0.0
+            )
             if min_green > 0.0:
                 norm_remaining_min_green = remaining_min_green / min_green
             else:
@@ -645,7 +665,11 @@ def tsc_isolated_intersection_feature_vector(
             for _ in range(max_steps):
                 idx = (idx + 1) % num_raw
                 mapped = mapping_raw_to_service_phase[idx]
-                dur = raw_phase_durations[idx] if 0 <= idx < len(raw_phase_durations) else 0.0
+                dur = (
+                    raw_phase_durations[idx]
+                    if 0 <= idx < len(raw_phase_durations)
+                    else 0.0
+                )
 
                 if mapped is None:
                     time_sum += dur
@@ -690,7 +714,9 @@ def tsc_isolated_intersection_feature_vector(
         """
         try:
             program_id = traci.trafficlight.getProgram(tls_id_local)
-            logics = traci.trafficlight.getCompleteRedYellowGreenDefinition(tls_id_local)
+            logics = traci.trafficlight.getCompleteRedYellowGreenDefinition(
+                tls_id_local
+            )
         except Exception:
             return [], [], []
 
@@ -706,8 +732,12 @@ def tsc_isolated_intersection_feature_vector(
 
         phases = list(getattr(chosen_logic, "phases", []))
         num_raw = len(phases)
-        raw_phase_durations = [float(getattr(ph, "duration", 0.0)) for ph in phases]
-        raw_phase_min_durs = [float(getattr(ph, "minDur", 0.0)) for ph in phases]
+        raw_phase_durations = [
+            float(getattr(ph, "duration", 0.0)) for ph in phases
+        ]
+        raw_phase_min_durs = [
+            float(getattr(ph, "minDur", 0.0)) for ph in phases
+        ]
         states = [str(getattr(ph, "state", "")) for ph in phases]
 
         mapping_raw_to_service_phase: List[Optional[int]] = [None] * num_raw
@@ -734,11 +764,19 @@ def tsc_isolated_intersection_feature_vector(
             raw_idxs = service_phase_to_raw_indices.get(srv_idx, [])
             min_green = 0.0
             if raw_idxs:
-                greens = [raw_phase_min_durs[j] for j in raw_idxs if raw_phase_min_durs[j] > 0.0]
+                greens = [
+                    raw_phase_min_durs[j]
+                    for j in raw_idxs
+                    if raw_phase_min_durs[j] > 0.0
+                ]
                 if greens:
                     min_green = max(greens)
                 else:
-                    dur_candidates = [raw_phase_durations[j] for j in raw_idxs if raw_phase_durations[j] > 0.0]
+                    dur_candidates = [
+                        raw_phase_durations[j]
+                        for j in raw_idxs
+                        if raw_phase_durations[j] > 0.0
+                    ]
                     if dur_candidates:
                         min_green = min(dur_candidates)
             if min_green <= 0.0:
@@ -788,7 +826,9 @@ def tsc_isolated_intersection_feature_vector(
                     "fairness_ratio": [],
                 }
 
-            window_steps = int(round(window_length / max(time_step_length, 1e-6)))
+            window_steps = int(
+                round(window_length / max(time_step_length, 1e-6))
+            )
             if window_steps <= 0:
                 window_steps = 1
 
@@ -832,7 +872,10 @@ def tsc_isolated_intersection_feature_vector(
 
         for mv in movements_order:
             lanes = movement_to_lanes.get(mv, [])
-            is_green = any(current_phase_state.get(lane_id, "r") in ("G", "g") for lane_id in lanes)
+            is_green = any(
+                current_phase_state.get(lane_id, "r") in ("G", "g")
+                for lane_id in lanes
+            )
 
             if is_green:
                 per_movement[mv]["time_since_last_green"] = 0.0
@@ -899,10 +942,12 @@ def tsc_isolated_intersection_feature_vector(
     # ------------------------------------------------------------------
     # 1) Geometry and vehicles
     leg_bearings = parse_intersection_bearings(intersection_encoding)
-    lane_metadata, lane_to_movement, inbound_lane_order, inbound_to_out_pairs = analyze_intersection_topology(
-        tls_id, leg_bearings
+    lane_metadata, lane_to_movement, inbound_lane_order, inbound_to_out_pairs = (
+        analyze_intersection_topology(tls_id, leg_bearings)
     )
-    vehicles = build_vehicle_descriptions(lane_metadata, inbound_lane_order, inbound_to_out_pairs)
+    vehicles = build_vehicle_descriptions(
+        lane_metadata, inbound_lane_order, inbound_to_out_pairs
+    )
 
     # Expected inbound lanes from scenario encoding: 4 legs × 3 lanes per leg
     expected_inbound_lanes = 12
@@ -918,26 +963,40 @@ def tsc_isolated_intersection_feature_vector(
         max_detection_distance_local=max_detection_distance,
     )
 
-    density_vec = np.array(lane_spatial_feats.get("density", []), dtype=float).flatten()
-    mean_speed_vec = np.array(lane_spatial_feats.get("mean_speed", []), dtype=float).flatten()
-    movement_vec = np.array(lane_spatial_feats.get("movement_weights", []), dtype=float).flatten()
+    density_vec = np.array(
+        lane_spatial_feats.get("density", []), dtype=float
+    ).flatten()
+    mean_speed_vec = np.array(
+        lane_spatial_feats.get("mean_speed", []), dtype=float
+    ).flatten()
+    movement_vec = np.array(
+        lane_spatial_feats.get("movement_weights", []), dtype=float
+    ).flatten()
 
     if density_vec.size < expected_density_len:
-        density_vec = np.pad(density_vec, (0, expected_density_len - density_vec.size))
+        density_vec = np.pad(
+            density_vec, (0, expected_density_len - density_vec.size)
+        )
     elif density_vec.size > expected_density_len:
         density_vec = density_vec[:expected_density_len]
 
     if mean_speed_vec.size < expected_speed_len:
-        mean_speed_vec = np.pad(mean_speed_vec, (0, expected_speed_len - mean_speed_vec.size))
+        mean_speed_vec = np.pad(
+            mean_speed_vec, (0, expected_speed_len - mean_speed_vec.size)
+        )
     elif mean_speed_vec.size > expected_speed_len:
         mean_speed_vec = mean_speed_vec[:expected_speed_len]
 
     if movement_vec.size < expected_movement_len:
-        movement_vec = np.pad(movement_vec, (0, expected_movement_len - movement_vec.size))
+        movement_vec = np.pad(
+            movement_vec, (0, expected_movement_len - movement_vec.size)
+        )
     elif movement_vec.size > expected_movement_len:
         movement_vec = movement_vec[:expected_movement_len]
 
-    expert01_features = density_vec.tolist() + mean_speed_vec.tolist() + movement_vec.tolist()
+    expert01_features = (
+        density_vec.tolist() + mean_speed_vec.tolist() + movement_vec.tolist()
+    )
 
     # 3) Expert 03 features
     if platoon_horizons is None:
@@ -967,12 +1026,17 @@ def tsc_isolated_intersection_feature_vector(
     except Exception:
         current_program_id = None
 
-    if phase_program_cache is None or phase_program_cache.get("program_id") != current_program_id:
+    if (
+        phase_program_cache is None
+        or phase_program_cache.get("program_id") != current_program_id
+    ):
         (
             mapping_raw_to_service_phase,
             raw_phase_durations,
             minimum_service_green_per_phase,
-        ) = build_phase_program_structures(tls_id, min_service_green_default)
+        ) = build_phase_program_structures(
+            tls_id, min_service_green_default
+        )
         phase_program_cache = {
             "program_id": current_program_id,
             "mapping_raw_to_service_phase": mapping_raw_to_service_phase,
@@ -981,9 +1045,13 @@ def tsc_isolated_intersection_feature_vector(
         }
         phase_program_cache_root[tls_id] = phase_program_cache
     else:
-        mapping_raw_to_service_phase = phase_program_cache["mapping_raw_to_service_phase"]
+        mapping_raw_to_service_phase = phase_program_cache[
+            "mapping_raw_to_service_phase"
+        ]
         raw_phase_durations = phase_program_cache["raw_phase_durations"]
-        minimum_service_green_per_phase = phase_program_cache["minimum_service_green_per_phase"]
+        minimum_service_green_per_phase = phase_program_cache[
+            "minimum_service_green_per_phase"
+        ]
 
     try:
         current_raw_phase_index = int(traci.trafficlight.getPhase(tls_id))
@@ -1027,7 +1095,9 @@ def tsc_isolated_intersection_feature_vector(
     phase_hist["last_service_phase_index"] = current_service_phase
     phase_hist["elapsed_in_service_phase"] = elapsed_service
 
-    elapsed_service_for_feature = elapsed_service if current_service_phase is not None else 0.0
+    elapsed_service_for_feature = (
+        elapsed_service if current_service_phase is not None else 0.0
+    )
 
     phase_feats = compute_phase_transition_cost_features(
         mapping_raw_to_service_phase,
@@ -1079,7 +1149,9 @@ def tsc_isolated_intersection_feature_vector(
 
     # Filter to inbound lanes only
     inbound_set = set(inbound_lane_order)
-    current_phase_state = {lid: col for lid, col in current_phase_state.items() if lid in inbound_set}
+    current_phase_state = {
+        lid: col for lid, col in current_phase_state.items() if lid in inbound_set
+    }
 
     # History cache per tls_id
     svc_hist_root = cache.setdefault("movement_service_history_cache", {})
@@ -1102,10 +1174,16 @@ def tsc_isolated_intersection_feature_vector(
     # Reorder expert_04 features into canonical (N,E,S,W × L,T,R) order and pad
     legs_order = ["N", "E", "S", "W"]
     movs_order = ["L", "T", "R"]
-    canonical_movements: List[Tuple[str, str]] = [(leg, mov) for leg in legs_order for mov in movs_order]
+    canonical_movements: List[Tuple[str, str]] = [
+        (leg, mov) for leg in legs_order for mov in movs_order
+    ]
 
-    movements_order_cached: List[Tuple[str, str]] = svc_history_cache.get("movements_order", [])
-    movement_index_map: Dict[Tuple[str, str], int] = {mv: idx for idx, mv in enumerate(movements_order_cached)}
+    movements_order_cached: List[Tuple[str, str]] = svc_history_cache.get(
+        "movements_order", []
+    )
+    movement_index_map: Dict[Tuple[str, str], int] = {
+        mv: idx for idx, mv in enumerate(movements_order_cached)
+    }
 
     def reorder_and_pad(vec: List[float]) -> List[float]:
         full = [0.0] * len(canonical_movements)
@@ -1127,7 +1205,12 @@ def tsc_isolated_intersection_feature_vector(
     # ------------------------------------------------------------------
     # Concatenate all expert features into final vector
     # ------------------------------------------------------------------
-    feature_vector = expert01_features + expert03_features + expert02_features + expert04_features
+    feature_vector = (
+        expert01_features
+        + expert03_features
+        + expert02_features
+        + expert04_features
+    )
 
     # Ensure pure float output
     return [float(x) for x in feature_vector]
