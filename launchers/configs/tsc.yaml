@@ -1,0 +1,309 @@
+# TSC verification matrix. This configuration calls the existing experiment CLIs.
+# No entry below edits experiment source. The launcher supplies the selected
+# extractor to the child process at the canonical module's natural import time.
+# Main: 56 training + 68 evaluation jobs. Ablations: 24 + 24. Total: 172.
+# Historical launch entries were mutable working configurations; the numerical
+# settings here are editable recipes, not a claim of complete historical provenance.
+version: 1
+
+variables:
+  training_profile: paper600
+  training_profiles:
+    paper600:
+      episodes: 600
+    current_launcher50:
+      episodes: 50
+  train_seed: 172
+  train_sumo_seed: 514
+  eval_sumo_seed: 10086
+  eval_episodes: 200
+  device: cuda
+  # Preserve the selected unbiased_simple_v1 branch of launch_ppo_run_new.ps1.
+  # These remain explicit so a historical or future setting can be selected
+  # without changing the trainer, the evaluator, or this matrix's structure.
+  train_wait_weight: 1.0
+  train_wait_ref: 40
+  train_wait_barrier_start: 10
+
+  scenarios:
+    22L22L:
+      paper_name: 'A 2x2 NSleft-bay'
+      sumocfg: '${sumo_home}/sumo_maps/4leg_22+22+/4leg_22+22+.sumocfg'
+      tls_id: J1
+    2L3S23O:
+      paper_name: 'B 2x3 NSone-way'
+      sumocfg: '${sumo_home}/sumo_maps/4leg_2L3S23O/4leg_2L3S23O.sumocfg'
+      tls_id: J4
+    3232sk:
+      paper_name: 'C 3x2 NS-skewed'
+      sumocfg: '${sumo_home}/sumo_maps/4leg_3232skewed/4leg_3232skewed.sumocfg'
+      tls_id: J0
+    3LR23LR2:
+      paper_name: 'D 3x2 EW-LR-bay'
+      sumocfg: '${sumo_home}/sumo_maps/4leg_3LR23LR2/4leg_3LR23LR2.sumocfg'
+      tls_id: J1
+
+  # Main-method snapshots have no proven matching mapping file in the available
+  # generated runs. Do not attach a mapping from a different feature version.
+  extractors:
+    22L22L:
+      full:
+        path: '${repo}/tests/sumo_traci/expert_feature_extractor_22L22L.py'
+        symbol: tsc_isolated_intersection_feature_vector
+      single_agent:
+        path: '${repo}/tests/auto_prompting/runs/debug_single_agent_phase_1_2_web_5.1_assembweb_22L22L_1/assembled_feature_function.py'
+        mapping: '${repo}/tests/auto_prompting/runs/debug_single_agent_phase_1_2_web_5.1_assembweb_22L22L_1/expert_feature_mapping.yaml'
+        symbol: tsc_isolated_intersection_feature_vector
+      nonorm:
+        path: '${repo}/tests/auto_prompting/runs/nonorm/debug_nonorm_5.1_assembweb_22L22L_1/assembled_feature_function.py'
+        mapping: '${repo}/tests/auto_prompting/runs/nonorm/debug_nonorm_5.1_assembweb_22L22L_1/expert_feature_mapping.yaml'
+        symbol: tsc_isolated_intersection_feature_vector
+    2L3S23O:
+      full:
+        path: '${repo}/tests/sumo_traci/expert_feature_extractor_2L3S23O_1.py'
+        symbol: tsc_isolated_intersection_feature_vector
+      single_agent:
+        path: '${repo}/tests/auto_prompting/runs/debug_single_agent_phase_1_2_web_5.1_assembweb_2L3S23O_1/assembled_feature_function.py'
+        mapping: '${repo}/tests/auto_prompting/runs/debug_single_agent_phase_1_2_web_5.1_assembweb_2L3S23O_1/expert_feature_mapping.yaml'
+        symbol: tsc_isolated_intersection_feature_vector
+      nonorm:
+        path: '${repo}/tests/auto_prompting/runs/nonorm/debug_nonorm_5.1_assembweb_2L3S23O_1/assembled_feature_function.py'
+        mapping: '${repo}/tests/auto_prompting/runs/nonorm/debug_nonorm_5.1_assembweb_2L3S23O_1/expert_feature_mapping.yaml'
+        symbol: tsc_isolated_intersection_feature_vector
+    3232sk:
+      full:
+        path: '${repo}/tests/sumo_traci/expert_feature_extractor_3232skewed.py'
+        symbol: tsc_isolated_intersection_feature_vector
+      single_agent:
+        path: '${repo}/tests/auto_prompting/runs/debug_single_agent_phase_1_2_web_5.1_assembweb_3232sk_1/assembled_feature_function.py'
+        mapping: '${repo}/tests/auto_prompting/runs/debug_single_agent_phase_1_2_web_5.1_assembweb_3232sk_1/expert_feature_mapping.yaml'
+        symbol: tsc_isolated_intersection_feature_vector
+      nonorm:
+        path: '${repo}/tests/auto_prompting/runs/nonorm/debug_nonorm_5.1_assembweb_3232sk_1/assembled_feature_function.py'
+        mapping: '${repo}/tests/auto_prompting/runs/nonorm/debug_nonorm_5.1_assembweb_3232sk_1/expert_feature_mapping.yaml'
+        symbol: tsc_isolated_intersection_feature_vector
+    3LR23LR2:
+      full:
+        path: '${repo}/tests/sumo_traci/expert_feature_extractor_3LR23LR2_2.py'
+        symbol: tsc_isolated_intersection_feature_vector
+      single_agent:
+        path: '${repo}/tests/auto_prompting/runs/debug_single_agent_phase_1_2_web_5.1_assembweb_3LR23LR2_1/assembled_feature_function.py'
+        mapping: '${repo}/tests/auto_prompting/runs/debug_single_agent_phase_1_2_web_5.1_assembweb_3LR23LR2_1/expert_feature_mapping.yaml'
+        symbol: tsc_isolated_intersection_feature_vector
+      nonorm:
+        path: '${repo}/tests/auto_prompting/runs/nonorm/debug_nonorm_5.1_assembweb_3LR23LR2_1/assembled_feature_function.py'
+        mapping: '${repo}/tests/auto_prompting/runs/nonorm/debug_nonorm_5.1_assembweb_3LR23LR2_1/expert_feature_mapping.yaml'
+        symbol: tsc_isolated_intersection_feature_vector
+
+  methods:
+    brp: {core: bounded_v2, addon: none, reward: pressure}
+    brq: {core: bounded_v2, addon: none, reward: queue}
+    bu: {core: bounded_v2, addon: none, reward: unbiased_simple_v1}
+    erp: {core: bounded_v2, addon: expert, reward: pressure, variant: full}
+    erq: {core: bounded_v2, addon: expert, reward: queue, variant: full}
+    eu: {core: bounded_v2, addon: expert, reward: unbiased_simple_v1, variant: full}
+    lb-a: {core: bounded_v2, addon: adlight_state, reward: unbiased_simple_v1}
+    lb-t: {core: bounded_v2, addon: ats, reward: unbiased_simple_v1}
+    lb-f: {core: bounded_v2, addon: frap_state, reward: unbiased_simple_v1}
+    lb-p: {core: bounded_v2, addon: pressure_state, reward: unbiased_simple_v1}
+    lo-a: {core: adlight_state, addon: none, reward: unbiased_simple_v1}
+    lo-t: {core: ats, addon: none, reward: unbiased_simple_v1}
+    lo-f: {core: frap_state, addon: none, reward: unbiased_simple_v1}
+    lo-p: {core: pressure_state, addon: none, reward: unbiased_simple_v1}
+    sa_p: {core: bounded_v2, addon: expert, reward: pressure, variant: single_agent}
+    sa_q: {core: bounded_v2, addon: expert, reward: queue, variant: single_agent}
+    sa_u: {core: bounded_v2, addon: expert, reward: unbiased_simple_v1, variant: single_agent}
+    ns_p: {core: bounded_v2, addon: expert, reward: pressure, variant: nonorm}
+    ns_q: {core: bounded_v2, addon: expert, reward: queue, variant: nonorm}
+    ns_u: {core: bounded_v2, addon: expert, reward: unbiased_simple_v1, variant: nonorm}
+  controllers:
+    ft: fixed_time
+    fa: fully_actuated
+    mp: max_pressure
+
+  training_args: &training_args
+    --sumocfg: '${scenarios.${scenario}.sumocfg}'
+    --max-time: 6000000
+    --episode-len: 7200
+    --warmup: 100
+    --episodes: '${training_profiles.${training_profile}.episodes}'
+    --seed: '${train_seed}'
+    --sumo-seed: '${train_sumo_seed}'
+    --delay-ms: 0
+    --hold: 5.0
+    --device: '${device}'
+    --gamma: 0.99
+    --hidden-dim: 256
+    --n-layer: 6
+    --actor-lr: 0.00005
+    --critic-lr: 0.0001
+    --traffic-scale-mean: 1.0
+    --traffic-scale-std: 0.05
+    --tb-logdir: '${job_dir}/tb'
+    --save-dir: '${job_dir}/models'
+    --rollout-steps: 2048
+    --ppo-epochs: 5
+    --minibatch: 256
+    --clip-eps: 0.2
+    --vf-clip-eps: 0.2
+    --gae-lambda: 0.95
+    --ent-coef: 0.04
+    --ent-coef-end: 0.005
+    --ent-coef-decay-updates: 400
+    --vf-coef: 1.0
+    --explore-alpha-start: 0.02
+    --explore-alpha-end: 0.005
+    --explore-alpha-decay-updates: 400
+    --target-kl: 0.04
+    --adv-clip: 3.0
+    --reward-name: '${methods.${method}.reward}'
+    --core-encoder-name: '${methods.${method}.core}'
+    --addon-encoder-name: '${methods.${method}.addon}'
+    --thr-ref: 2.0
+    --queue-ref: 1.0
+    --w-thr: 0.9
+    --w-queue: 0.7
+    --w-wait: '${train_wait_weight}'
+    --wait-ref: '${train_wait_ref}'
+    --wait-barrier-start: '${train_wait_barrier_start}'
+    --softmax-wait-beta: 5
+    --softmax-queue-beta: 3.0
+    --queue-power: 1.0
+    --reward-clip-lo: -5.0
+    --reward-clip-hi: 5.0
+    --log-tag: '${scenario}_${method}'
+
+  evaluation_args: &evaluation_args
+    --sumocfg: '${scenarios.${scenario}.sumocfg}'
+    --tls-id: '${scenarios.${scenario}.tls_id}'
+    --log-dir: '${job_dir}/eval'
+    --log-tag: '${scenario}_${method}'
+    --episodes: '${eval_episodes}'
+    --episode-len: 3600
+    --warmup: 100
+    --sumo-seed: '${eval_sumo_seed}'
+    --traffic-scale: 1.0
+    --deterministic: true
+    --device: '${device}'
+    --w-thr: 0.9
+    --w-queue: 0.7
+    --w-wait: 1.3
+
+  training_outputs: &training_outputs
+    checkpoint: {glob: '${job_dir}/models/*.pt', one: true}
+    meta: {glob: '${job_dir}/models/*.json', one: true}
+    expert_stats: {glob: '${job_dir}/tb/**/expert_feature_reports/*.csv', required: false}
+    baseline_stats: {glob: '${job_dir}/tb/**/baseline_feature_reports/*.csv', required: false}
+  evaluation_outputs: &evaluation_outputs
+    summary: {glob: '${job_dir}/eval/*_summary.json', one: true}
+    episodes: {glob: '${job_dir}/eval/*.jsonl', one: true}
+
+defaults:
+  python: '${python_sumo}'
+  cwd: '${repo}/tests/sumo_traci'
+  env:
+    SUMO_HOME: '${sumo_home}'
+    PYTHONUNBUFFERED: '1'
+  inputs:
+    - '${scenarios.${scenario}.sumocfg}'
+
+jobs:
+  # Eleven learned main methods without a generated addon.
+  - id: 'tsc-train-${scenario}-${method}'
+    stage: tsc_train
+    script: '${repo}/tests/sumo_traci/run_ppo_tsc.py'
+    matrix:
+      scenario: &scenarios [22L22L, 2L3S23O, 3232sk, 3LR23LR2]
+      method: &nonexpert_methods [brp, brq, bu, lb-a, lb-t, lb-f, lb-p, lo-a, lo-t, lo-f, lo-p]
+    args: *training_args
+    extractor: null
+    outputs: *training_outputs
+
+  - id: 'tsc-eval-${scenario}-${method}'
+    stage: tsc_eval
+    script: '${repo}/tests/sumo_traci/eval_ppo_tsc.py'
+    matrix:
+      scenario: *scenarios
+      method: *nonexpert_methods
+    args:
+      <<: *evaluation_args
+      --controller-name: ppo
+      --checkpoint: {from_job: 'tsc-train-${scenario}-${method}', artifact: checkpoint}
+      --meta: {from_job: 'tsc-train-${scenario}-${method}', artifact: meta}
+    extractor: null
+    outputs: *evaluation_outputs
+
+  # Full-method generated features, three reward choices per scenario.
+  - id: 'tsc-train-${scenario}-${method}'
+    stage: tsc_train
+    script: '${repo}/tests/sumo_traci/run_ppo_tsc.py'
+    matrix:
+      scenario: *scenarios
+      method: &expert_methods [erp, erq, eu]
+    args: *training_args
+    extractor: '${extractors.${scenario}.${methods.${method}.variant}}'
+    outputs:
+      <<: *training_outputs
+      extractor: {path: '${job_dir}/inputs/extractor.py'}
+
+  - id: 'tsc-eval-${scenario}-${method}'
+    stage: tsc_eval
+    script: '${repo}/tests/sumo_traci/eval_ppo_tsc.py'
+    matrix:
+      scenario: *scenarios
+      method: *expert_methods
+    args:
+      <<: *evaluation_args
+      --controller-name: ppo
+      --checkpoint: {from_job: 'tsc-train-${scenario}-${method}', artifact: checkpoint}
+      --meta: {from_job: 'tsc-train-${scenario}-${method}', artifact: meta}
+    extractor:
+      path: {from_job: 'tsc-train-${scenario}-${method}', artifact: extractor}
+      symbol: tsc_isolated_intersection_feature_vector
+    outputs: *evaluation_outputs
+
+  # sa_* uses virtual expert slots; ns_* uses the no-normalization prompt outputs
+  # and skips statistics correction. Neither is an inference-time zeroing test.
+  - id: 'tsc-train-${scenario}-${method}'
+    stage: tsc_train
+    script: '${repo}/tests/sumo_traci/run_ppo_tsc.py'
+    matrix:
+      scenario: *scenarios
+      method: &ablation_methods [sa_p, sa_q, sa_u, ns_p, ns_q, ns_u]
+    args: *training_args
+    extractor: '${extractors.${scenario}.${methods.${method}.variant}}'
+    outputs:
+      <<: *training_outputs
+      extractor: {path: '${job_dir}/inputs/extractor.py'}
+      mapping: {path: '${job_dir}/inputs/mapping.yaml'}
+
+  - id: 'tsc-eval-${scenario}-${method}'
+    stage: tsc_eval
+    script: '${repo}/tests/sumo_traci/eval_ppo_tsc.py'
+    matrix:
+      scenario: *scenarios
+      method: *ablation_methods
+    args:
+      <<: *evaluation_args
+      --controller-name: ppo
+      --checkpoint: {from_job: 'tsc-train-${scenario}-${method}', artifact: checkpoint}
+      --meta: {from_job: 'tsc-train-${scenario}-${method}', artifact: meta}
+    extractor:
+      path: {from_job: 'tsc-train-${scenario}-${method}', artifact: extractor}
+      mapping: {from_job: 'tsc-train-${scenario}-${method}', artifact: mapping}
+      symbol: tsc_isolated_intersection_feature_vector
+    outputs: *evaluation_outputs
+
+  - id: 'tsc-eval-${scenario}-${method}'
+    stage: tsc_eval
+    script: '${repo}/tests/sumo_traci/eval_ppo_tsc.py'
+    matrix:
+      scenario: *scenarios
+      method: [ft, fa, mp]
+    args:
+      <<: *evaluation_args
+      --controller-name: '${controllers.${method}}'
+      # Preserve the existing evaluator's controller defaults. In particular,
+      # do not silently change its hold-dependent R scaling for rule baselines.
+    extractor: null
+    outputs: *evaluation_outputs

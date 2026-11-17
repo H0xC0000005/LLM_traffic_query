@@ -1,0 +1,18 @@
+# Copy to local.yaml and pass --local launchers/configs/local.yaml.
+# These machine-specific values override config variables; keep API credentials
+# in the inherited shell environment rather than any launcher YAML.
+variables:
+  python_sumo: 'E:/anaconda3/envs/sumo/python.exe'
+  python_energy: 'E:/anaconda3/envs/energy_pred/python.exe'
+  python_llm: 'E:/anaconda3/envs/llm/python.exe'
+  python_llmfe: 'E:/anaconda3/envs/llmfe/python.exe'
+  sumo_home: 'E:/Sumo'
+
+# Optional config-specific overrides:
+#  data_parquet: 'E:/path/to/prepared_parquet_directory'
+#  expert_extractor: 'E:/path/to/compatible_energy_extractor.py'
+#  phase12_run_dir: 'E:/path/to/phase12/result'
+#  expert_stats_csv: 'E:/path/to/expert_features.csv'
+#  baseline_stats_csv: 'E:/path/to/baseline_features.csv'
+#  phase3_task_vars: 'E:/path/to/matching_task_vars.yaml'
+#  baseline_feature_description: 'E:/path/to/baseline_semantics.yaml'

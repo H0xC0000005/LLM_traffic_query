@@ -30,3 +30,5 @@ memo.txt
 top_solutions
 
 /temp_content
+/launch_runs/
+/launchers/configs/local.yaml

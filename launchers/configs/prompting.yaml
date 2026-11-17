@@ -1,0 +1,238 @@
+# Declarative entry points for the existing prompting scripts. Planning this
+# config does not call an LLM. Executing a selected job uses the real API client.
+# Set OPENAI_API_KEY in the launching shell; credentials do not belong here.
+version: 1
+
+variables:
+  # These defaults identify the same four scenario descriptions used locally.
+  # Only generated per-run task YAMLs receive these scenario substitutions.
+  scenarios:
+    22L22L:
+      encoding: '{N@8^(0,+1):L60|T|TR; E@90:LT|TR; S@197^(0,+1):L60|T|TR;W@270:LT|TR}'
+    2L3S23O:
+      encoding: '{N@335:->3; E@90^(+1,+1):T|TR; S@155^:LT|T|TRx; W@270^(+1,+1):L60|T|T}'
+    3232sk:
+      encoding: '{N@0^(-5,+5):L|T|TR; E@90^(-1,+1):L|T|TR; S@180^(-5,+5):L|T|TR;W@270^(-1,+1):L|T|TR}'
+    3LR23LR2:
+      encoding: '{N@7^(+1,+1):LT|TR; E@90^(-1,+3):L60|T|T|T|R60; S@190^(+1,+1):LT|TR;W@270^(-1,+3):L60|T|T|T|R60}'
+
+  # Phase 3 is deliberately standalone: supply distributions and task variables
+  # belonging to the exact phase-1+2 extractor under correction. A diagnostic
+  # downstream run is a separate step; no arbitrary/latest CSV is chosen here.
+  phase12_run_dir: '__SET_PHASE12_RUN_DIR__'
+  expert_stats_csv: '__SET_EXPERT_STATS_CSV__'
+  baseline_stats_csv: '__SET_BASELINE_STATS_CSV__'
+  phase3_task_vars: '__SET_MATCHING_PHASE3_TASK_VARS__'
+  baseline_feature_description: '__SET_BASELINE_FEATURE_DESCRIPTION__'
+
+defaults:
+  python: '${python_llm}'
+  cwd: '${repo}/tests/auto_prompting'
+  env:
+    PYTHONUNBUFFERED: '1'
+  args:
+    --model-meta: gpt5.1
+    --max-output-tokens: 160000
+    --non-interactive: true
+
+jobs:
+  - id: energy-phase12
+    stage: phase12
+    script: '${repo}/tests/auto_prompting/run_phase_1_2.py'
+    args:
+      --template: '${repo}/tests/auto_prompting/templates/template_phase2_dedup.yaml'
+      --task-vars: '${repo}/tests/auto_prompting/templates/energy.yaml'
+      --run-dir: '${job_dir}/result'
+      --num-experts: 4
+      --max-rounds: 5
+      --max-refine-count: 1
+      --feature-plan-web-search: true
+      --assembler-web-search: true
+    inputs:
+      - '${repo}/tests/auto_prompting/templates/template_phase2_dedup.yaml'
+      - '${repo}/tests/auto_prompting/templates/energy.yaml'
+    outputs:
+      extractor:
+        path: '${job_dir}/result/assembled_feature_function.py'
+      mapping:
+        path: '${job_dir}/result/expert_feature_mapping.yaml'
+      phase12_run_dir:
+        path: '${job_dir}/result'
+      final_topics:
+        path: '${job_dir}/result/final_topics.yaml'
+      expert_feature_plans:
+        path: '${job_dir}/result/expert_feature_plans.yaml'
+      expert_code_pieces:
+        path: '${job_dir}/result/expert_code_pieces.yaml'
+
+  - id: 'tsc-main-phase12-${scenario}'
+    stage: phase12
+    script: '${repo}/tests/auto_prompting/run_phase_1_2.py'
+    matrix:
+      scenario: [22L22L, 2L3S23O, 3232sk, 3LR23LR2]
+    yaml_inputs:
+      task_vars:
+        source: '${repo}/tests/auto_prompting/templates/tsc_phase2_improved_signal_context.yaml'
+        overrides:
+          variables:
+            scenario_instance: |
+              The group is analyzing the following intersection:
+              "${scenarios.${scenario}.encoding}"
+
+              There are no pedestrians in this intersection.
+    args:
+      --template: '${repo}/tests/auto_prompting/templates/template_phase2_dedup.yaml'
+      --task-vars: '${yaml_inputs.task_vars}'
+      --run-dir: '${job_dir}/result'
+      --num-experts: 4
+      --max-rounds: 5
+      --max-refine-count: 1
+      --feature-plan-web-search: true
+      --assembler-web-search: true
+    inputs:
+      - '${repo}/tests/auto_prompting/templates/template_phase2_dedup.yaml'
+      - '${repo}/tests/auto_prompting/templates/tsc_phase2_improved_signal_context.yaml'
+      - '${yaml_inputs.task_vars}'
+    outputs:
+      extractor:
+        path: '${job_dir}/result/assembled_feature_function.py'
+      mapping:
+        path: '${job_dir}/result/expert_feature_mapping.yaml'
+      phase12_run_dir:
+        path: '${job_dir}/result'
+      final_topics:
+        path: '${job_dir}/result/final_topics.yaml'
+      expert_feature_plans:
+        path: '${job_dir}/result/expert_feature_plans.yaml'
+      expert_code_pieces:
+        path: '${job_dir}/result/expert_code_pieces.yaml'
+
+  - id: 'tsc-single-phase12-${scenario}'
+    stage: phase12
+    script: '${repo}/tests/auto_prompting/run_single_agent_phase_1_2.py'
+    matrix:
+      scenario: [22L22L, 2L3S23O, 3232sk, 3LR23LR2]
+    yaml_inputs:
+      task_vars:
+        source: '${repo}/tests/auto_prompting/templates/tsc_phase2_improved_signal_context.yaml'
+        overrides:
+          variables:
+            scenario_instance: |
+              The group is analyzing the following intersection:
+              "${scenarios.${scenario}.encoding}"
+
+              There are no pedestrians in this intersection.
+    args:
+      --template: '${repo}/tests/auto_prompting/templates/template_single_agent_phase12_signal_context.yaml'
+      --task-vars: '${yaml_inputs.task_vars}'
+      --run-dir: '${job_dir}/result'
+      --num-experts: 4
+      --max-rounds: 5
+      --max-refine-count: 1
+      --feature-plan-web-search: true
+      --assembler-web-search: true
+    inputs:
+      - '${repo}/tests/auto_prompting/templates/template_single_agent_phase12_signal_context.yaml'
+      - '${repo}/tests/auto_prompting/templates/tsc_phase2_improved_signal_context.yaml'
+      - '${yaml_inputs.task_vars}'
+    outputs:
+      extractor:
+        path: '${job_dir}/result/assembled_feature_function.py'
+      mapping:
+        path: '${job_dir}/result/expert_feature_mapping.yaml'
+      phase12_run_dir:
+        path: '${job_dir}/result'
+      final_topics:
+        path: '${job_dir}/result/final_topics.yaml'
+      expert_feature_plans:
+        path: '${job_dir}/result/expert_feature_plans.yaml'
+      expert_code_pieces:
+        path: '${job_dir}/result/expert_code_pieces.yaml'
+
+  # These are terminal feature-generation jobs. The no-correction ablation
+  # changes both the prompt and task priors and must not be routed to phase 3.
+  - id: 'tsc-nonorm-phase12-${scenario}'
+    stage: phase12
+    script: '${repo}/tests/auto_prompting/run_phase_1_2.py'
+    matrix:
+      scenario: [22L22L, 2L3S23O, 3232sk, 3LR23LR2]
+    yaml_inputs:
+      task_vars:
+        source: '${repo}/tests/auto_prompting/templates/tsc_phase2_no_normalization.yaml'
+        overrides:
+          variables:
+            scenario_instance: |
+              The group is analyzing the following intersection:
+              "${scenarios.${scenario}.encoding}"
+
+              There are no pedestrians in this intersection.
+    args:
+      --template: '${repo}/tests/auto_prompting/templates/template_phase2_no_normalization_aligned.yaml'
+      --task-vars: '${yaml_inputs.task_vars}'
+      --run-dir: '${job_dir}/result'
+      --num-experts: 4
+      --max-rounds: 5
+      --max-refine-count: 1
+      --feature-plan-web-search: true
+      --assembler-web-search: true
+    inputs:
+      - '${repo}/tests/auto_prompting/templates/template_phase2_no_normalization_aligned.yaml'
+      - '${repo}/tests/auto_prompting/templates/tsc_phase2_no_normalization.yaml'
+      - '${yaml_inputs.task_vars}'
+    outputs:
+      extractor:
+        path: '${job_dir}/result/assembled_feature_function.py'
+      mapping:
+        path: '${job_dir}/result/expert_feature_mapping.yaml'
+      phase12_run_dir:
+        path: '${job_dir}/result'
+      final_topics:
+        path: '${job_dir}/result/final_topics.yaml'
+      expert_feature_plans:
+        path: '${job_dir}/result/expert_feature_plans.yaml'
+      expert_code_pieces:
+        path: '${job_dir}/result/expert_code_pieces.yaml'
+
+  - id: phase3-correction
+    stage: phase3
+    script: '${repo}/tests/auto_prompting/run_phase_3.py'
+    args:
+      --phase12-run-dir: '${phase12_run_dir}'
+      --expert-stats-csv: '${expert_stats_csv}'
+      --baseline-stats-csv: '${baseline_stats_csv}'
+      --baseline-feature-description: '${baseline_feature_description}'
+      --evaluator-template: '${repo}/tests/auto_prompting/templates/template_phase3_evaluator_general.yaml'
+      --expert-template: '${repo}/tests/auto_prompting/templates/template_phase3_expert_correction.yaml'
+      --assembler-template: '${repo}/tests/auto_prompting/templates/template_v3.yaml'
+      --task-vars: '${phase3_task_vars}'
+      --output-dir: '${job_dir}/result'
+      --assembler-web-search: true
+    inputs:
+      - '${phase12_run_dir}/final_topics.yaml'
+      - '${phase12_run_dir}/expert_feature_plans.yaml'
+      - '${phase12_run_dir}/expert_code_pieces.yaml'
+      - '${phase12_run_dir}/expert_feature_mapping.yaml'
+      - '${expert_stats_csv}'
+      - '${baseline_stats_csv}'
+      - '${baseline_feature_description}'
+      - '${repo}/tests/auto_prompting/templates/template_phase3_evaluator_general.yaml'
+      - '${repo}/tests/auto_prompting/templates/template_phase3_expert_correction.yaml'
+      - '${repo}/tests/auto_prompting/templates/template_v3.yaml'
+      - '${phase3_task_vars}'
+    outputs:
+      extractor:
+        path: '${job_dir}/result/assembled_feature_function.py'
+      mapping:
+        path: '${job_dir}/result/expert_feature_mapping.yaml'
+      phase3_run_dir:
+        path: '${job_dir}/result'
+      expert_feature_plans:
+        path: '${job_dir}/result/updated_expert_feature_plans.yaml'
+      expert_code_pieces:
+        path: '${job_dir}/result/updated_expert_code_pieces.yaml'
+      expert_corrections:
+        path: '${job_dir}/result/expert_corrections.yaml'
+      evaluator_feedback:
+        path: '${job_dir}/result/evaluator_feedback.yaml'
+      preflight_report:
+        path: '${job_dir}/result/preflight_report.yaml'

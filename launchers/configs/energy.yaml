@@ -1,0 +1,99 @@
+# Wraps the existing expanding-window CV trainer; no training code is changed.
+# Each encoder gets a separate output directory and an independent run.
+version: 1
+
+variables:
+  data_parquet: '${repo}/tests/energy_prediction/dataset/ashrae-energy-prediction/processed_features/ashrae_train_cleaned_plus_manual_features'
+  expert_extractor: '${repo}/tests/energy_prediction/expert_feature_extractor.py'
+  encoders:
+    none:
+      exclude_building_id: false
+    expert:
+      exclude_building_id: true
+    rank2:
+      exclude_building_id: false
+    rank4:
+      exclude_building_id: true
+    rank5:
+      exclude_building_id: true
+    rank25:
+      exclude_building_id: true
+
+defaults:
+  python: '${python_energy}'
+  cwd: '${repo}'
+  env:
+    PYTHONUNBUFFERED: '1'
+  args:
+    '--data_parquet': '${data_parquet}'
+    '--out_dir': '${job_dir}/results'
+    '--supplementary_encoder': '${encoder}'
+    '--supplementary_exclude_building_id': '${encoders.${encoder}.exclude_building_id}'
+    '--cv_num_folds': 4
+    '--cv_first_train_days': 180
+    '--cv_eval_days': 45
+    '--cv_fold_step_days': 45
+    '--cv_tail_days': 14
+    '--learning_rate': 0.05
+    '--num_leaves': 63
+    '--min_data_in_leaf': 500
+    '--feature_fraction': 0.8
+    '--bagging_fraction': 0.8
+    '--bagging_freq': 1
+    '--lambda_l2': 1.0
+    '--max_bin': 255
+    '--n_estimators': 12000
+    '--early_stopping_rounds': 200
+    '--early_stopping_min_delta': 0.001
+    '--log_period': 100
+    '--seed': 155
+    '--log_tag': 'parity_${encoder}'
+
+jobs:
+  - id: 'energy-${encoder}'
+    stage: energy.cv
+    script: '${repo}/tests/energy_prediction/train_tree_lgbm_registry_cv.py'
+    matrix:
+      encoder: [none, rank2, rank4, rank5, rank25]
+    inputs:
+      - '${data_parquet}'
+    outputs:
+      cv_summary:
+        glob: '${job_dir}/results/models/**/cv_summary.json'
+        one: true
+      fold_metrics:
+        glob: '${job_dir}/results/models/**/cv_fold_metrics.csv'
+        one: true
+      fold_models:
+        glob: '${job_dir}/results/models/**/fold_*/lgbm_model.txt'
+      feature_manifests:
+        glob: '${job_dir}/results/models/**/fold_*/feature_manifest.json'
+      feature_caches:
+        glob: '${job_dir}/results/models/**/fold_*/*_feature_cache.pkl'
+        required: false
+
+  - id: 'energy-${encoder}'
+    stage: energy.cv
+    script: '${repo}/tests/energy_prediction/train_tree_lgbm_registry_cv.py'
+    matrix:
+      encoder: [expert]
+    # This must retain the current integrated extractor's calling/data contract.
+    # Newly generated functions may require manual schema integration first.
+    extractor:
+      path: '${expert_extractor}'
+      symbol: extract_expert_features
+    inputs:
+      - '${data_parquet}'
+    outputs:
+      cv_summary:
+        glob: '${job_dir}/results/models/**/cv_summary.json'
+        one: true
+      fold_metrics:
+        glob: '${job_dir}/results/models/**/cv_fold_metrics.csv'
+        one: true
+      fold_models:
+        glob: '${job_dir}/results/models/**/fold_*/lgbm_model.txt'
+      feature_manifests:
+        glob: '${job_dir}/results/models/**/fold_*/feature_manifest.json'
+      feature_caches:
+        glob: '${job_dir}/results/models/**/fold_*/*_feature_cache.pkl'

@@ -1,0 +1,66 @@
+# Candidate searches only. The existing runner does not perform frozen-candidate
+# final-test evaluation, so these jobs do not claim to reproduce final scores.
+# The unchanged API client requires API_KEY in the inherited environment.
+version: 1
+
+variables:
+  data_parquet: '${repo}/tests/energy_prediction/dataset/ashrae-energy-prediction/processed_features/ashrae_train_cleaned_plus_manual_features'
+
+defaults:
+  python: '${python_llmfe}'
+  cwd: '${repo}/tests/energy_prediction/LLMFE'
+  env:
+    PYTHONUNBUFFERED: '1'
+  args:
+    '--data_parquet': '${data_parquet}'
+    '--out_dir': '${job_dir}/search'
+    '--spec_path': '${repo}/tests/energy_prediction/LLMFE/specs/specification_energy_forecasting.txt'
+    '--use_api': true
+    '--api_model': '${model}'
+    '--wall_clock_hours': 12
+    '--max_candidates': 20
+    '--evaluate_timeout_seconds': 3600
+    '--samples_per_prompt': 3
+    '--functions_per_prompt': 2
+    '--num_islands': 3
+    '--train_start_day': 0
+    '--train_end_day_exclusive': 280
+    '--inner_eval_start_day': 280
+    '--inner_eval_end_day_exclusive': 320
+    '--final_test_start_day': 320
+    '--final_test_end_day_exclusive': 366
+    '--early_stopping_tail_days': 21
+    '--learning_rate': 0.05
+    '--num_leaves': 63
+    '--min_data_in_leaf': 500
+    '--feature_fraction': 0.8
+    '--bagging_fraction': 0.8
+    '--bagging_freq': 1
+    '--lambda_l2': 1.0
+    '--max_bin': 255
+    '--n_estimators': 12000
+    '--early_stopping_rounds': 200
+    '--early_stopping_min_delta': 0.001
+    '--seed': 155
+    '--num_threads': 0
+
+jobs:
+  - id: 'llmfe-${model}'
+    stage: energy.llmfe.search
+    script: '${repo}/tests/energy_prediction/LLMFE/main_energy_forecasting.py'
+    matrix:
+      model: [gpt-3.5-turbo, gpt-4.1-mini, gpt-5.4-mini]
+    # SIGALRM in the old runner is unavailable on native Windows.
+    wall_timeout_seconds: 43200
+    inputs:
+      - '${data_parquet}'
+      - '${repo}/tests/energy_prediction/LLMFE/specs/specification_energy_forecasting.txt'
+    outputs:
+      search_config:
+        path: '${job_dir}/search/energy_llmfe_config.json'
+      candidate_audit:
+        path: '${job_dir}/search/candidate_audit.jsonl'
+      best_candidate:
+        path: '${job_dir}/search/best_candidate.py'
+      best_candidate_metadata:
+        path: '${job_dir}/search/best_candidate.json'

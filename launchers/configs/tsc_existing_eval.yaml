@@ -1,0 +1,42 @@
+# Evaluate existing checkpoints without scheduling a new training job.
+# Supply checkpoint and the exact compatible extractor via --var or --local.
+version: 1
+variables:
+  checkpoint: '__SET_CHECKPOINT__'
+  meta: null
+  # For expert checkpoints, set this mapping to {path: ..., symbol: ...}.
+  # Null preserves normal imports for historical baseline/literature checkpoints.
+  extractor: null
+  device: cuda
+defaults:
+  python: '${python_sumo}'
+  cwd: '${repo}/tests/sumo_traci'
+  env:
+    SUMO_HOME: '${sumo_home}'
+    PYTHONUNBUFFERED: '1'
+jobs:
+  - id: tsc-existing-eval
+    stage: tsc_eval
+    script: '${repo}/tests/sumo_traci/eval_ppo_tsc.py'
+    extractor: '${extractor}'
+    args:
+      --controller-name: ppo
+      --checkpoint: '${checkpoint}'
+      --meta: '${meta}'
+      --log-dir: '${job_dir}/eval'
+      --log-tag: existing
+      --episodes: 200
+      --episode-len: 3600
+      --warmup: 100
+      --sumo-seed: 10086
+      --traffic-scale: 1.0
+      --deterministic: true
+      --device: '${device}'
+      --w-thr: 0.9
+      --w-queue: 0.7
+      --w-wait: 1.3
+    inputs:
+      - '${checkpoint}'
+    outputs:
+      summary: {glob: '${job_dir}/eval/*_summary.json', one: true}
+      episodes: {glob: '${job_dir}/eval/*.jsonl', one: true}
